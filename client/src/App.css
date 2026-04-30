@@ -4,6 +4,59 @@
   padding: 2rem 1.25rem;
 }
 
+.auth-topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.4rem;
+}
+
+.theme-toggle {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+.theme-icon {
+  width: 1.1rem;
+  height: 1.1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.theme-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.theme-label {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.theme-toggle:hover {
+  transform: translateY(-1px);
+}
+
+:root[data-theme='dark'] .theme-toggle:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+:root[data-theme='light'] .theme-toggle:hover {
+  background: rgba(15, 23, 42, 0.04);
+}
+
 .app h1 {
   margin: 0 0 0.35rem;
   font-size: 1.5rem;
@@ -12,7 +65,7 @@
 
 .tagline {
   margin: 0 0 0.4rem;
-  color: #9aa0b4;
+  color: var(--muted);
   font-size: 0.9rem;
 }
 
@@ -23,8 +76,8 @@
 }
 
 .resume-card {
-  border-color: #3a5a8a;
-  background: #172033;
+  border-color: var(--mine-border);
+  background: var(--resume-bg);
 }
 
 .topbar {
@@ -85,15 +138,15 @@
 .chat-sub {
   margin: 0.15rem 0 0;
   font-size: 0.85rem;
-  color: #9aa0b4;
+  color: var(--muted);
 }
 
 .chat-sub.online {
-  color: #7dffb3;
+  color: var(--ok);
 }
 
 .chat-sub.offline {
-  color: #7a8199;
+  color: var(--muted2);
 }
 
 .day-sep {
@@ -104,10 +157,10 @@
 
 .day-sep span {
   font-size: 0.8rem;
-  color: #9aa0b4;
+  color: var(--muted);
   padding: 0.25rem 0.6rem;
-  background: #14141a;
-  border: 1px solid #2a2a38;
+  background: var(--panel);
+  border: 1px solid var(--card-border);
   border-radius: 999px;
 }
 
@@ -117,10 +170,10 @@
   display: flex;
   flex-direction: column;
   justify-content: center;
-  border: 1px dashed #2a2a38;
+  border: 1px dashed var(--card-border);
   border-radius: 10px;
   padding: 1.5rem;
-  background: #14141a;
+  background: var(--panel);
 }
 
 .empty-chat h2 {
@@ -140,10 +193,16 @@
 }
 
 .card {
-  background: #1c1c26;
-  border: 1px solid #2a2a38;
+  background: var(--card);
+  border: 1px solid var(--card-border);
   border-radius: 10px;
   padding: 1rem 1.25rem;
+}
+
+:root[data-theme='light'] .card {
+  box-shadow:
+    0 1px 1px rgba(15, 23, 42, 0.04),
+    0 8px 24px rgba(15, 23, 42, 0.06);
 }
 
 .card h2 {
@@ -155,7 +214,7 @@
 .status {
   margin: 0;
   padding: 0.75rem;
-  background: #14141a;
+  background: var(--panel);
   border-radius: 6px;
   font-size: 0.85rem;
   overflow-x: auto;
@@ -167,16 +226,16 @@
 }
 
 .status-line .ok {
-  color: #7dffb3;
+  color: var(--ok);
 }
 
 .status-line .warn {
-  color: #ffd47d;
+  color: var(--warn);
 }
 
 .error {
   margin: 0.5rem 0 0;
-  color: #f88;
+  color: var(--danger);
 }
 
 .field {
@@ -188,15 +247,15 @@
 
 .field label {
   font-size: 0.85rem;
-  color: #b8bdd0;
+  color: var(--muted);
 }
 
 .field input {
   padding: 0.5rem 0.65rem;
   border-radius: 6px;
-  border: 1px solid #3a3a4a;
-  background: #0f0f14;
-  color: #e8e8f0;
+  border: 1px solid var(--input-border);
+  background: var(--input);
+  color: var(--text);
 }
 
 .actions {
@@ -209,8 +268,8 @@
 button {
   padding: 0.45rem 0.9rem;
   border-radius: 6px;
-  border: 1px solid #4a6fff;
-  background: #2a3f7a;
+  border: 1px solid var(--primary);
+  background: var(--primary-bg);
   color: #f2f6ff;
   cursor: pointer;
   font-size: 0.9rem;
@@ -222,19 +281,23 @@ button:disabled {
 }
 
 button.ghost {
-  border-color: #3a3a4a;
+  border-color: var(--input-border);
   background: transparent;
-  color: #c8d0e8;
+  color: var(--text);
+}
+
+:root[data-theme='light'] button.ghost {
+  background: rgba(255, 255, 255, 0.6);
 }
 
 .hint {
   margin: 0 0 0.75rem;
   font-size: 0.85rem;
-  color: #9aa0b4;
+  color: var(--muted);
 }
 
 .muted {
-  color: #7a8199;
+  color: var(--muted2);
   font-size: 0.9rem;
 }
 
@@ -257,9 +320,9 @@ button.ghost {
   width: 100%;
   justify-content: space-between;
   text-align: left;
-  border: 1px solid #2a2a38;
-  background: #14141a;
-  color: #e8e8f0;
+  border: 1px solid var(--card-border);
+  background: var(--panel);
+  color: var(--text);
 }
 
 .user-name {
@@ -277,20 +340,20 @@ button.ghost {
 
 .user-state {
   font-size: 0.8rem;
-  color: #9aa0b4;
+  color: var(--muted);
 }
 
 .user-state.online {
-  color: #7dffb3;
+  color: var(--ok);
 }
 
 .user-state.offline {
-  color: #7a8199;
+  color: var(--muted2);
 }
 
 .user-pick.active {
-  border-color: #4a6fff;
-  background: #1c2540;
+  border-color: var(--primary);
+  background: var(--active-bg);
 }
 
 .dot {
@@ -300,11 +363,11 @@ button.ghost {
 }
 
 .dot.online {
-  background: #3dff9c;
+  background: var(--online-dot);
 }
 
 .dot.offline {
-  background: #555b70;
+  background: var(--offline-dot);
 }
 
 .thread {
@@ -312,9 +375,9 @@ button.ghost {
   min-height: 12rem;
   overflow-y: auto;
   padding: 0.75rem;
-  background: #14141a;
+  background: var(--panel);
   border-radius: 8px;
-  border: 1px solid #2a2a38;
+  border: 1px solid var(--card-border);
   margin-bottom: 0.75rem;
 }
 
@@ -322,18 +385,18 @@ button.ghost {
   margin-bottom: 0.65rem;
   border-radius: 8px;
   padding: 0.5rem 0.65rem;
-  background: #1c1c26;
-  border: 1px solid #2a2a38;
+  background: var(--card);
+  border: 1px solid var(--card-border);
 }
 
 .bubble.mine {
-  border-color: #3a5a8a;
-  background: #1a2230;
+  border-color: var(--mine-border);
+  background: var(--mine-bg);
 }
 
 .bubble .meta {
   font-size: 0.75rem;
-  color: #9aa0b4;
+  color: var(--muted);
   margin-bottom: 0.25rem;
 }
 
@@ -351,14 +414,14 @@ button.ghost {
   flex: 1;
   padding: 0.5rem 0.65rem;
   border-radius: 6px;
-  border: 1px solid #3a3a4a;
-  background: #0f0f14;
-  color: #e8e8f0;
+  border: 1px solid var(--input-border);
+  background: var(--input);
+  color: var(--text);
 }
 
 .success {
   margin: 0 0 0.5rem;
-  color: #7dffb3;
+  color: var(--ok);
   font-size: 0.9rem;
 }
 

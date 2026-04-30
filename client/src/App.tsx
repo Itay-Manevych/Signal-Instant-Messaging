@@ -5,6 +5,7 @@ import type { WsServerMessage } from './protocol';
 
 const TOKEN_KEY = 'signal-im-token';
 const USER_KEY = 'signal-im-user';
+const THEME_KEY = 'signal-im-theme';
 
 type Session = { token: string; userId: string; username: string };
 
@@ -54,6 +55,47 @@ function clearSession() {
   sessionStorage.removeItem(USER_KEY);
 }
 
+type Theme = 'dark' | 'light';
+
+function loadTheme(): Theme | null {
+  try {
+    const raw = localStorage.getItem(THEME_KEY);
+    return raw === 'light' || raw === 'dark' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function SunIcon() {
+  return (
+    <svg viewBox="0 0 24 24" role="presentation" aria-hidden="true">
+      <path
+        d="M12 3v2.25M12 18.75V21M4.5 12H3m18 0h-1.5M5.47 5.47l1.59 1.59m11.47 11.47 1.59 1.59M18.53 5.47l-1.59 1.59M7.06 16.94l-1.59 1.59M12 16.5a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" role="presentation" aria-hidden="true">
+      <path
+        d="M21 12.8A7.8 7.8 0 1 1 11.2 3a6.2 6.2 0 0 0 9.8 9.8Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export default function App() {
   // Don't auto-sign-in on refresh; offer "resume" explicitly to avoid confusion
   // when a stale token exists in sessionStorage.
@@ -75,8 +117,26 @@ export default function App() {
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
   const [wsState, setWsState] = useState<'idle' | 'connecting' | 'open' | 'closed'>('idle');
   const [wsError, setWsError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = loadTheme();
+    if (saved) return saved;
+    const prefersLight =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-color-scheme: light)').matches;
+    return prefersLight ? 'light' : 'dark';
+  });
 
   const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      // ignore
+    }
+  }, [theme]);
 
   const loadPeers = useCallback(async (tok: string) => {
     const users = await fetchUsers(tok);
@@ -273,8 +333,23 @@ export default function App() {
   if (!session) {
     return (
       <main className="app">
-        <h1>Signal Instant Messaging</h1>
-        <p className="tagline">Messages are not end-to-end encrypted yet.</p>
+        <div className="auth-topbar">
+          <div>
+            <h1>Signal Instant Messaging</h1>
+            <p className="tagline">Messages are not end-to-end encrypted yet.</p>
+          </div>
+          <button
+            type="button"
+            className="ghost theme-toggle"
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            <span className="theme-icon" aria-hidden="true">
+              {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+            </span>
+            <span className="theme-label">{theme === 'dark' ? 'Light' : 'Dark'}</span>
+          </button>
+        </div>
         <div className="auth-stack">
           {savedSession && (
             <section className="card resume-card">
@@ -377,6 +452,17 @@ export default function App() {
           </p>
         </div>
         <div className="topbar-actions">
+          <button
+            type="button"
+            className="ghost theme-toggle"
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            <span className="theme-icon" aria-hidden="true">
+              {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+            </span>
+            <span className="theme-label">{theme === 'dark' ? 'Light' : 'Dark'}</span>
+          </button>
           <button type="button" className="ghost" onClick={logout}>
             Sign out
           </button>
