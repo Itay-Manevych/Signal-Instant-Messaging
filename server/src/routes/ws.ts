@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
-import type { ConnectionHub, UserStore } from '../store.js';
+import type { ConnectionHub, PendingChatMessage, UserStore } from '../store.js';
 import type { WsClientMessage, WsServerMessage } from '../protocol.js';
 
 function parseQueryToken(url: string | undefined): string | null {
@@ -67,6 +67,16 @@ export function registerWsRoutes(
     socket.send(JSON.stringify(connected));
     broadcastPresence(hub, store);
 
+    // Flush queued messages for this user (offline delivery).
+    const pending = store.listPendingMessagesForUser(userId);
+    if (pending.length > 0) {
+      for (const msg of pending) {
+        const out: WsServerMessage = { type: 'chat', ...msg };
+        socket.send(JSON.stringify(out));
+      }
+      store.deletePendingMessages(pending.map((m) => m.id));
+    }
+
     socket.on('message', (raw: WebSocket.RawData) => {
       let parsed: unknown;
       try {
@@ -126,17 +136,8 @@ export function registerWsRoutes(
           socket.send(JSON.stringify(err));
           return;
         }
-        if (!hub.isOnline(toUserId)) {
-          const err: WsServerMessage = {
-            type: 'error',
-            message: 'Recipient is offline',
-          };
-          socket.send(JSON.stringify(err));
-          return;
-        }
 
-        const out: WsServerMessage = {
-          type: 'chat',
+        const out: PendingChatMessage = {
           id: randomUUID(),
           fromUserId: userId,
           fromUsername: user.username,
@@ -144,8 +145,18 @@ export function registerWsRoutes(
           text,
           sentAt: new Date().toISOString(),
         };
-        hub.sendTo(userId, out);
-        hub.sendTo(toUserId, out);
+
+        // Persist message history regardless of recipient online state.
+        store.saveMessage(out);
+
+        // Always echo to sender.
+        hub.sendTo(userId, { type: 'chat', ...out } satisfies WsServerMessage);
+
+        // If recipient is online, deliver immediately; otherwise enqueue for later.
+        const delivered = hub.sendTo(toUserId, { type: 'chat', ...out } satisfies WsServerMessage);
+        if (!delivered) {
+          store.enqueuePendingMessage(out);
+        }
         return;
       }
 

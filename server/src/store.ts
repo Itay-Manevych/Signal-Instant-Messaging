@@ -4,6 +4,14 @@ import type { Db } from './db.js';
 
 export type PublicUser = { id: string; username: string };
 export type IdentityKeyPublic = { keyType: 'x25519'; publicKeyB64: string };
+export type PendingChatMessage = {
+  id: string;
+  fromUserId: string;
+  fromUsername: string;
+  toUserId: string;
+  text: string;
+  sentAt: string;
+};
 
 type UserRecord = {
   id: string;
@@ -128,6 +136,103 @@ export class UserStore {
     if (!row) return null;
     if (row.keyType !== 'x25519') return null;
     return { keyType: 'x25519', publicKeyB64: row.publicKeyB64 };
+  }
+
+  saveMessage(msg: PendingChatMessage): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO messages (
+          id, from_user_id, from_username, to_user_id, text, sent_at, created_at
+        )
+        VALUES (
+          @id, @from_user_id, @from_username, @to_user_id, @text, @sent_at, @created_at
+        )
+      `,
+      )
+      .run({
+        id: msg.id,
+        from_user_id: msg.fromUserId,
+        from_username: msg.fromUsername,
+        to_user_id: msg.toUserId,
+        text: msg.text,
+        sent_at: msg.sentAt,
+        created_at: new Date().toISOString(),
+      });
+  }
+
+  listConversation(userId: string, peerId: string, limit = 200): PendingChatMessage[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          id,
+          from_user_id AS fromUserId,
+          from_username AS fromUsername,
+          to_user_id AS toUserId,
+          text,
+          sent_at AS sentAt
+        FROM messages
+        WHERE
+          (from_user_id = @me AND to_user_id = @peer)
+          OR
+          (from_user_id = @peer AND to_user_id = @me)
+        ORDER BY sent_at ASC
+        LIMIT @limit
+      `,
+      )
+      .all({ me: userId, peer: peerId, limit }) as PendingChatMessage[];
+    return rows;
+  }
+
+  enqueuePendingMessage(msg: PendingChatMessage): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO pending_messages (
+          id, from_user_id, from_username, to_user_id, text, sent_at, created_at
+        )
+        VALUES (
+          @id, @from_user_id, @from_username, @to_user_id, @text, @sent_at, @created_at
+        )
+      `,
+      )
+      .run({
+        id: msg.id,
+        from_user_id: msg.fromUserId,
+        from_username: msg.fromUsername,
+        to_user_id: msg.toUserId,
+        text: msg.text,
+        sent_at: msg.sentAt,
+        created_at: new Date().toISOString(),
+      });
+  }
+
+  listPendingMessagesForUser(toUserId: string, limit = 200): PendingChatMessage[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          id,
+          from_user_id AS fromUserId,
+          from_username AS fromUsername,
+          to_user_id AS toUserId,
+          text,
+          sent_at AS sentAt
+        FROM pending_messages
+        WHERE to_user_id = ?
+        ORDER BY created_at ASC
+        LIMIT ?
+      `,
+      )
+      .all(toUserId, limit) as PendingChatMessage[];
+    return rows;
+  }
+
+  deletePendingMessages(ids: string[]): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(', ');
+    this.db.prepare(`DELETE FROM pending_messages WHERE id IN (${placeholders})`).run(...ids);
   }
 }
 

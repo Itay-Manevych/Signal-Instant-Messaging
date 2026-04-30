@@ -8,6 +8,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerWsRoutes } from './routes/ws.js';
 import { openDb, migrate } from './db.js';
 import { registerKeyRoutes } from './routes/keys.js';
+import { registerMessageRoutes } from './routes/messages.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-in-production';
@@ -43,6 +44,7 @@ app.get('/api/health', async () => ({
 
 await registerAuthRoutes(app, store);
 await registerKeyRoutes(app, store);
+await registerMessageRoutes(app, store);
 
 await app.register(fastifyWebsocket);
 registerWsRoutes(app, store, hub);

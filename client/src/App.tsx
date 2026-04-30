@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
-import { fetchUsers, login, register } from './api';
+import { fetchConversation, fetchUsers, login, register } from './api';
 import type { WsServerMessage } from './protocol';
 
 const TOKEN_KEY = 'signal-im-token';
@@ -12,6 +12,20 @@ type ChatMessage = Extract<WsServerMessage, { type: 'chat' }>;
 
 function peerIdForMessage(msg: ChatMessage, selfId: string): string {
   return msg.fromUserId === selfId ? msg.toUserId : msg.fromUserId;
+}
+
+function dayKey(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function formatDayLabel(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 function loadSession(): Session | null {
@@ -41,7 +55,10 @@ function clearSession() {
 }
 
 export default function App() {
-  const [session, setSession] = useState<Session | null>(() => loadSession());
+  // Don't auto-sign-in on refresh; offer "resume" explicitly to avoid confusion
+  // when a stale token exists in sessionStorage.
+  const [savedSession, setSavedSession] = useState<Session | null>(() => loadSession());
+  const [session, setSession] = useState<Session | null>(null);
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -71,7 +88,14 @@ export default function App() {
     let cancelled = false;
     loadPeers(session.token).catch((e: unknown) => {
       if (!cancelled) {
-        setFormError(e instanceof Error ? e.message : 'Failed to load users');
+        const msg = e instanceof Error ? e.message : 'Failed to load users';
+        setFormError(msg);
+        // If we lost auth, don't keep a broken "logged in" UI around.
+        if (/^HTTP 401\b|^HTTP 403\b/i.test(msg)) {
+          setSession(null);
+          clearSession();
+          setSavedSession(null);
+        }
       }
     });
     return () => {
@@ -98,16 +122,26 @@ export default function App() {
 
     ws.onopen = () => {
       setWsState('open');
+      setWsError(null);
       void loadPeers(session.token);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       setWsState('closed');
       if (wsRef.current === ws) wsRef.current = null;
+      // 4401 is what the server uses for auth errors in server/src/routes/ws.ts
+      if (ev.code === 4401) {
+        const reason = ev.reason || 'Unauthorized';
+        setWsError(`WebSocket closed: ${reason}`);
+        setSession(null);
+        clearSession();
+        setSavedSession(null);
+      }
     };
 
     ws.onerror = () => {
-      setWsError('WebSocket error');
+      // Browsers give little detail here; treat it as a hint, not a hard failure.
+      setWsError((prev) => prev ?? 'WebSocket error');
     };
 
     ws.onmessage = (ev) => {
@@ -173,6 +207,7 @@ export default function App() {
         };
         saveSession(s);
         setSession(s);
+        setSavedSession(s);
         setThreads({});
         setRecipientId('');
       }
@@ -186,6 +221,7 @@ export default function App() {
   const logout = () => {
     setSession(null);
     clearSession();
+    setSavedSession(null);
     setThreads({});
     setPeerList([]);
     setRecipientId('');
@@ -216,9 +252,22 @@ export default function App() {
     return peerList.find((p) => p.id === recipientId)?.username ?? null;
   }, [recipientId, peerList]);
 
+  const activePeerOnline = useMemo(() => {
+    if (!recipientId) return false;
+    return onlineIds.has(recipientId);
+  }, [recipientId, onlineIds]);
+
   const selectPeer = (id: string) => {
     setRecipientId(id);
     setDraft('');
+    if (!session) return;
+    fetchConversation(session.token, id)
+      .then((msgs) => {
+        setThreads((prev) => ({ ...prev, [id]: msgs as ChatMessage[] }));
+      })
+      .catch(() => {
+        // If history fails to load, keep UI responsive; WS will still deliver new messages.
+      });
   };
 
   if (!session) {
@@ -226,58 +275,93 @@ export default function App() {
       <main className="app">
         <h1>Signal Instant Messaging</h1>
         <p className="tagline">Messages are not end-to-end encrypted yet.</p>
-        <section className="card">
-          <h2>{mode === 'login' ? 'Sign in' : 'Create account'}</h2>
-          {authSuccess && <p className="success">{authSuccess}</p>}
-          {formError && <p className="error">{formError}</p>}
-          <div className="field">
-            <label htmlFor="user">Username</label>
-            <input
-              id="user"
-              autoComplete="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="pass">Password</label>
-            <input
-              id="pass"
-              type="password"
-              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
-          {mode === 'register' && (
+        <div className="auth-stack">
+          {savedSession && (
+            <section className="card resume-card">
+              <h2>Resume session?</h2>
+              <p className="hint">
+                You have a saved session as <b>{savedSession.username}</b>.
+              </p>
+              <div className="actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSession(savedSession);
+                    setFormError(null);
+                    setAuthSuccess(null);
+                  }}
+                >
+                  Continue as {savedSession.username}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    clearSession();
+                    setSavedSession(null);
+                    setFormError(null);
+                    setAuthSuccess(null);
+                  }}
+                >
+                  Sign in as different user
+                </button>
+              </div>
+            </section>
+          )}
+
+          <section className="card">
+            <h2>{mode === 'login' ? 'Sign in' : 'Create account'}</h2>
+            {authSuccess && <p className="success">{authSuccess}</p>}
+            {formError && <p className="error">{formError}</p>}
             <div className="field">
-              <label htmlFor="pass2">Confirm password</label>
+              <label htmlFor="user">Username</label>
               <input
-                id="pass2"
-                type="password"
-                autoComplete="new-password"
-                value={password2}
-                onChange={(e) => setPassword2(e.target.value)}
+                id="user"
+                autoComplete="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
               />
             </div>
-          )}
-          <div className="actions">
-            <button type="button" disabled={busy} onClick={submitAuth}>
-              {busy ? '…' : mode === 'login' ? 'Sign in' : 'Register'}
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => {
-                setMode(mode === 'login' ? 'register' : 'login');
-                setFormError(null);
-                setAuthSuccess(null);
-              }}
-            >
-              {mode === 'login' ? 'Need an account?' : 'Have an account?'}
-            </button>
-          </div>
-        </section>
+            <div className="field">
+              <label htmlFor="pass">Password</label>
+              <input
+                id="pass"
+                type="password"
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            {mode === 'register' && (
+              <div className="field">
+                <label htmlFor="pass2">Confirm password</label>
+                <input
+                  id="pass2"
+                  type="password"
+                  autoComplete="new-password"
+                  value={password2}
+                  onChange={(e) => setPassword2(e.target.value)}
+                />
+              </div>
+            )}
+            <div className="actions">
+              <button type="button" disabled={busy} onClick={submitAuth}>
+                {busy ? '…' : mode === 'login' ? 'Sign in' : 'Register'}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setMode(mode === 'login' ? 'register' : 'login');
+                  setFormError(null);
+                  setAuthSuccess(null);
+                }}
+              >
+                {mode === 'login' ? 'Need an account?' : 'Have an account?'}
+              </button>
+            </div>
+          </section>
+        </div>
       </main>
     );
   }
@@ -288,25 +372,24 @@ export default function App() {
         <div>
           <h1>Signal Instant Messaging</h1>
           <p className="tagline">Signed in as {session.username}</p>
+          <p className="status-line">
+            WebSocket: <span className={wsState === 'open' ? 'ok' : 'warn'}>{wsState}</span>
+          </p>
         </div>
-        <button type="button" className="ghost" onClick={logout}>
-          Sign out
-        </button>
+        <div className="topbar-actions">
+          <button type="button" className="ghost" onClick={logout}>
+            Sign out
+          </button>
+        </div>
       </header>
 
-      <section className="grid">
-        <div className="card">
-          <h2>Connection</h2>
-          <p className="status-line">
-            WebSocket:{' '}
-            <span className={wsState === 'open' ? 'ok' : 'warn'}>{wsState}</span>
-          </p>
-          {wsError && <p className="error">{wsError}</p>}
-        </div>
-
-        <div className="card">
-          <h2>Users</h2>
-          <p className="hint">Select a user to open a separate conversation.</p>
+      <section className="chat-layout">
+        <aside className="card sidebar">
+          <div className="sidebar-head">
+            <h2>Users</h2>
+            {wsError && <p className="error">{wsError}</p>}
+            <p className="hint">Click a user to open a separate conversation.</p>
+          </div>
           <ul className="user-list">
             {sortedPeers.length === 0 && <li className="muted">No other users registered.</li>}
             {sortedPeers.map((p) => (
@@ -316,57 +399,80 @@ export default function App() {
                   className={recipientId === p.id ? 'user-pick active' : 'user-pick'}
                   onClick={() => selectPeer(p.id)}
                 >
-                  {p.username}
-                  {onlineIds.has(p.id) ? (
-                    <span className="dot online" title="Online" />
-                  ) : (
-                    <span className="dot offline" title="Offline" />
-                  )}
+                  <span className="user-name">{p.username}</span>
+                  <span className="user-meta">
+                    <span className={onlineIds.has(p.id) ? 'user-state online' : 'user-state offline'}>
+                      {onlineIds.has(p.id) ? 'Online' : 'Offline'}
+                    </span>
+                    <span className={onlineIds.has(p.id) ? 'dot online' : 'dot offline'} aria-hidden="true" />
+                  </span>
                 </button>
               </li>
             ))}
           </ul>
-        </div>
-      </section>
+        </aside>
 
-      <section className="card chat">
-        <h2>
-          {activePeerName ? `Chat with ${activePeerName}` : 'Chat'}
-        </h2>
-        {!recipientId && (
-          <p className="hint chat-hint">Choose someone from the list to see your conversation with them.</p>
-        )}
-        <div className="thread">
-          {recipientId && activeMessages.length === 0 && (
-            <p className="muted">No messages in this conversation yet.</p>
-          )}
-          {activeMessages.map((m) => {
-            const mine = m.fromUserId === session.userId;
-            return (
-              <div key={m.id} className={mine ? 'bubble mine' : 'bubble'}>
-                <div className="meta">
-                  {mine ? 'You' : m.fromUsername} ·{' '}
-                  {new Date(m.sentAt).toLocaleTimeString()}
-                </div>
-                <div className="text">{m.text}</div>
+        <section className="card chat-pane">
+          {!recipientId ? (
+            <div className="empty-chat">
+              <h2>Chat</h2>
+              <p className="hint">
+                Pick a user from the left to open your conversation with them.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="chat-head">
+                <h2 className="chat-title">{activePeerName ?? 'Chat'}</h2>
+                {activePeerName && (
+                  <p className={activePeerOnline ? 'chat-sub online' : 'chat-sub offline'}>
+                    {activePeerOnline ? 'Online' : 'Offline'}
+                  </p>
+                )}
               </div>
-            );
-          })}
-        </div>
-        <div className="composer">
-          <input
-            placeholder={recipientId ? 'Message…' : 'Pick a recipient first'}
-            value={draft}
-            disabled={!recipientId || wsState !== 'open'}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') sendChat();
-            }}
-          />
-          <button type="button" disabled={!recipientId || wsState !== 'open'} onClick={sendChat}>
-            Send
-          </button>
-        </div>
+              <div className="thread">
+                {activeMessages.length === 0 && (
+                  <p className="muted">No messages in this conversation yet.</p>
+                )}
+                {activeMessages.map((m, idx) => {
+                  const mine = m.fromUserId === session.userId;
+                  const prev = idx > 0 ? activeMessages[idx - 1] : null;
+                  const showDay = !prev || dayKey(prev.sentAt) !== dayKey(m.sentAt);
+                  return (
+                    <div key={m.id}>
+                      {showDay && (
+                        <div className="day-sep">
+                          <span>{formatDayLabel(m.sentAt)}</span>
+                        </div>
+                      )}
+                      <div className={mine ? 'bubble mine' : 'bubble'}>
+                        <div className="meta">
+                          {mine ? 'You' : m.fromUsername} ·{' '}
+                          {new Date(m.sentAt).toLocaleTimeString()}
+                        </div>
+                        <div className="text">{m.text}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="composer">
+                <input
+                  placeholder={wsState === 'open' ? 'Message…' : 'Connecting…'}
+                  value={draft}
+                  disabled={wsState !== 'open'}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') sendChat();
+                  }}
+                />
+                <button type="button" disabled={wsState !== 'open'} onClick={sendChat}>
+                  Send
+                </button>
+              </div>
+            </>
+          )}
+        </section>
       </section>
     </main>
   );

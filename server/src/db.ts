@@ -35,6 +35,40 @@ export function migrate(db: Db): void {
       updated_at TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
+
+    -- Plain transport message history (pre-E2EE). Once Double Ratchet lands,
+    -- store encrypted payloads here instead of plaintext.
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      from_user_id TEXT NOT NULL,
+      from_username TEXT NOT NULL,
+      to_user_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      sent_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (from_user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (to_user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_pair_created_at
+      ON messages(from_user_id, to_user_id, created_at);
+
+    -- Plain-transport offline queue (pre-E2EE). Once Double Ratchet lands,
+    -- this will store encrypted payloads instead of plaintext.
+    CREATE TABLE IF NOT EXISTS pending_messages (
+      id TEXT PRIMARY KEY,
+      from_user_id TEXT NOT NULL,
+      from_username TEXT NOT NULL,
+      to_user_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      sent_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (from_user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (to_user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pending_messages_to_user_created_at
+      ON pending_messages(to_user_id, created_at);
   `);
 }
 
