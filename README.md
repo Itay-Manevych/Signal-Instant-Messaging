@@ -8,7 +8,11 @@ Instant messaging secured with **end-to-end encryption** using the **Signal prot
 
 ## Data storage
 
-There is **no database**. Users live in an in-memory `Map` on the server (`UserStore` in `server/src/store.ts`). Passwords are stored as **bcrypt** hashes. **Restarting the server clears all accounts**; WebSocket connections are also memory-only.
+The server uses **SQLite** for persistence (accounts + published identity public keys).
+
+- **DB file**: set `DB_PATH` (default `./data/dev.sqlite` under `server/`)
+- **Passwords**: stored as **bcrypt** hashes
+- **WebSocket connections**: still memory-only (presence is ephemeral)
 
 ## Run
 
@@ -20,6 +24,11 @@ npm run dev
 - API defaults to port **3000** (set `PORT` to change it).
 - The Vite dev server proxies `/api` (including **WebSocket** upgrades) to the API. The proxy target defaults to `http://localhost:3000`; override with **`VITE_API_PROXY`** if you need a different port.
 - Set **`JWT_SECRET`** in production (a default is used in development).
+- Optional: set **`DB_PATH`** to control where the SQLite file lives (see `server/.env.example`).
+
+**Environment file**
+
+- Copy `server/.env.example` → `server/.env` and edit values as needed.
 
 ## Port 3000 already in use (EADDRINUSE)
 
@@ -50,6 +59,8 @@ npm run dev:3001
 - `POST /api/register` — `{ "username", "password" }` → `{ userId, username, token }`
 - `POST /api/login` — same shape as register response
 - `GET /api/users` — `Authorization: Bearer <token>` → list of other users
+- `PUT /api/keys/identity` — `Authorization: Bearer <token>` + `{ "publicKeyB64": "<base64 32 bytes>" }` → `{ ok: true }`
+- `GET /api/keys/identity/:userId` — `Authorization: Bearer <token>` → `{ userId, username, identityKey }`
 - `GET /api/health` — health check
 
 **WebSocket**

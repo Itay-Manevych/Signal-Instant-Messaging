@@ -12,10 +12,13 @@
     "@fastify/jwt": "^9.0.4",
     "@fastify/websocket": "^11.2.0",
     "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^12.0.0",
+    "dotenv": "^17.2.1",
     "fastify": "^5.2.1"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.10",
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.3",
