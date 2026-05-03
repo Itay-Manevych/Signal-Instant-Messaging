@@ -5,6 +5,8 @@ import type { WsServerMessage } from './protocol';
 import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64 } from './crypto/signalKeys';
 import { sign } from './crypto/signalCrypto';
 import { createDevEnvelope, devBase64ToUtf8, loadSenderIdentityKeyB64 } from './crypto/envelope';
+import { getSession, listSessions } from './crypto/sessionManager';
+import { protocolLog, protocolWarn, shortId } from './crypto/protocolLog';
 
 const TOKEN_KEY = 'signal-im-token';
 const USER_KEY = 'signal-im-user';
@@ -184,18 +186,19 @@ export default function App() {
     const stored = localStorage.getItem(KEY_STORAGE_PREFIX);
 
     if (stored) {
-      console.log('✅ Keys already exist in localStorage for', session.username);
+      protocolLog('local identity/prekeys loaded', { user: session.username });
       return;
     }
 
     if (enrollingRef.current) return;
     enrollingRef.current = true;
 
-    console.log('🚀 No keys found. Starting Automated Enrollment for', session.username);
+    protocolLog('local keys missing; starting pre-key enrollment', { user: session.username });
 
     const enroll = async () => {
       try {
         // 1. Generate local keys
+        protocolLog('generating identity key, signed prekey, and OPKs');
         const ik = generateIdentityKeyPair();
         const spk = generateSignedPreKeyPair();
         const sig = sign(ik.privateKey, spk.publicKey);
@@ -226,6 +229,7 @@ export default function App() {
         // 2. Publish public components to server FIRST
         // If this fails, we catch it and don't save to localStorage, 
         // allowing the effect to retry on the next session trigger.
+        protocolLog('publishing public pre-key bundle', { opks: fullState.oneTimePreKeys.length });
         await publishKeys(session.token, {
           identityKeyB64: fullState.identityKey.publicKeyB64,
           signedPreKeyB64: fullState.signedPreKey.publicKeyB64,
@@ -236,9 +240,11 @@ export default function App() {
         // 3. Save private + public keys to localStorage ONLY after success
         localStorage.setItem(KEY_STORAGE_PREFIX, JSON.stringify(fullState));
 
-        console.log('✨ Enrollment successful: Public keys published for', session.username);
+        protocolLog('pre-key enrollment complete', { user: session.username });
       } catch (err) {
-        console.error('❌ Enrollment failed:', err);
+        protocolWarn('pre-key enrollment failed', {
+          reason: err instanceof Error ? err.message : 'unknown',
+        });
       } finally {
         enrollingRef.current = false;
       }
@@ -261,12 +267,17 @@ export default function App() {
 
     setWsState('connecting');
     setWsError(null);
+    protocolLog('websocket connecting', { user: session.username });
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
       setWsState('open');
       setWsError(null);
+      protocolLog('websocket open', {
+        user: session.username,
+        sessions: listSessions(session.userId).length,
+      });
       void loadPeers(session.token);
     };
 
@@ -285,6 +296,7 @@ export default function App() {
 
     ws.onerror = () => {
       // Browsers give little detail here; treat it as a hint, not a hard failure.
+      protocolWarn('websocket error');
       setWsError((prev) => prev ?? 'WebSocket error');
     };
 
@@ -303,6 +315,12 @@ export default function App() {
       }
       if (msg.type === 'chat') {
         const peerId = peerIdForMessage(msg, session.userId);
+        const storedSession = getSession(session.userId, peerId);
+        protocolLog('chat received', {
+          from: shortId(msg.fromUserId),
+          format: msg.envelope ? 'envelope' : 'legacy-text',
+          session: storedSession?.isInitialized ? 'initialized' : 'missing',
+        });
         setThreads((prev) => {
           const list = prev[peerId] ?? [];
           if (list.some((m) => m.id === msg.id)) return prev;
@@ -377,9 +395,21 @@ export default function App() {
     if (!session || !ws || ws.readyState !== WebSocket.OPEN || !recipientId) return;
     const text = draft.trim();
     if (!text) return;
+    const storedSession = getSession(session.userId, recipientId);
+    protocolLog('send requested', {
+      to: shortId(recipientId),
+      session: storedSession?.isInitialized ? 'initialized' : 'missing',
+    });
+    if (!storedSession) {
+      protocolWarn('no crypto session yet; using dev envelope placeholder', {
+        to: shortId(recipientId),
+      });
+    }
     const senderIdentityKeyB64 = loadSenderIdentityKeyB64(session.userId);
     const envelope = createDevEnvelope(text, senderIdentityKeyB64);
+    protocolLog('envelope created', { kind: envelope.kind, encrypted: false });
     ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, envelope }));
+    protocolLog('envelope sent over websocket', { to: shortId(recipientId) });
     setDraft('');
   };
 
@@ -407,8 +437,18 @@ export default function App() {
     setRecipientId(id);
     setDraft('');
     if (!session) return;
+    const storedSession = getSession(session.userId, id);
+    protocolLog('conversation selected', {
+      peer: shortId(id),
+      session: storedSession?.isInitialized ? 'initialized' : 'missing',
+    });
     fetchConversation(session.token, id)
       .then((msgs) => {
+        protocolLog('history received', {
+          peer: shortId(id),
+          count: msgs.length,
+          envelopes: msgs.filter((m) => m.envelope).length,
+        });
         setThreads((prev) => ({ ...prev, [id]: msgs as ChatMessage[] }));
       })
       .catch(() => {

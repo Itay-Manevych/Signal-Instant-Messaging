@@ -61,5 +61,5 @@ export type WsServerMessage =
       text?: string;
       envelope?: ChatEnvelope;
       sentAt: string;
-    }okay
+    }
   | { type: 'error'; message: string };
