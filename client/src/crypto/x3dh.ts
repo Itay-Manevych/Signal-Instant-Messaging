@@ -50,7 +50,8 @@ export interface SenderHandshakeResult {
  */
 export function initializeSenderSession(
   senderIdentityPrivateKey: Uint8Array,
-  bundle: PreKeyBundle
+  bundle: PreKeyBundle,
+  providedEphemeralKeyPair?: { publicKey: Uint8Array; privateKey: Uint8Array }
 ): SenderHandshakeResult {
   // 1. Verify Signed PreKey Signature
   const valid = verify(
@@ -60,8 +61,8 @@ export function initializeSenderSession(
   );
   if (!valid) throw new Error('Invalid Signed PreKey signature');
 
-  // 2. Generate Ephemeral Key Pair
-  const ephemeral = generateEphemeralKeyPair();
+  // 2. Use or Generate Ephemeral Key Pair
+  const ephemeral = providedEphemeralKeyPair || generateEphemeralKeyPair();
 
   // 3. Perform DH exchanges
   // DH1 = DH(IK_A, SPK_B)

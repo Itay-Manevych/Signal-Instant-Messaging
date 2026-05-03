@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
-import { fetchConversation, fetchUsers, login, publishKeys, register } from './api';
-import type { WsServerMessage } from './protocol';
-import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64 } from './crypto/signalKeys';
-import { sign } from './crypto/signalCrypto';
+import { fetchConversation, fetchUsers, login, publishKeys, register, fetchPreKeyBundle } from './api.js';
+import type { WsServerMessage } from './protocol.js';
+import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64, fromBase64 } from './crypto/signalKeys.js';
+import { sign } from './crypto/signalCrypto.js';
+import { deserializeRatchetState, encryptMessage, decryptMessage, initializeRatchet, serializeRatchetState, type RatchetState } from './crypto/doubleRatchet.js';
+import { initializeReceiverSession, initializeSenderSession } from './crypto/x3dh.js';
+import type { Session, ChatMessage, Theme } from './types.js';
 
 const TOKEN_KEY = 'signal-im-token';
 const USER_KEY = 'signal-im-user';
 const THEME_KEY = 'signal-im-theme';
 
-type Session = { token: string; userId: string; username: string };
-
-type ChatMessage = Extract<WsServerMessage, { type: 'chat' }>;
+const SESSION_PREFIX = 'signal-session-';
+const THREADS_PREFIX = 'signal-threads-';
 
 function peerIdForMessage(msg: ChatMessage, selfId: string): string {
   return msg.fromUserId === selfId ? msg.toUserId : msg.fromUserId;
@@ -56,8 +58,6 @@ function clearSession() {
   sessionStorage.removeItem(TOKEN_KEY);
   sessionStorage.removeItem(USER_KEY);
 }
-
-type Theme = 'dark' | 'light';
 
 function loadTheme(): Theme | null {
   try {
@@ -115,10 +115,20 @@ export default function App() {
   const [recipientId, setRecipientId] = useState('');
   const [draft, setDraft] = useState('');
   /** One message list per peer (other user's id). */
-  const [threads, setThreads] = useState<Record<string, ChatMessage[]>>({});
+  const [threads, setThreads] = useState<Record<string, ChatMessage[]>>(() => {
+    if (!savedSession) return {};
+    try {
+      const raw = localStorage.getItem(`${THREADS_PREFIX}${savedSession.userId}`);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
   const [wsState, setWsState] = useState<'idle' | 'connecting' | 'open' | 'closed'>('idle');
   const [wsError, setWsError] = useState<string | null>(null);
+  const messageQueue = useRef<WsServerMessage[]>([]);
+  const isProcessing = useRef(false);
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = loadTheme();
     if (saved) return saved;
@@ -140,6 +150,15 @@ export default function App() {
       // ignore
     }
   }, [theme]);
+
+  useEffect(() => {
+    if (!session) return;
+    try {
+      localStorage.setItem(`${THREADS_PREFIX}${session.userId}`, JSON.stringify(threads));
+    } catch (err) {
+      console.warn('Failed to persist threads to localStorage:', err);
+    }
+  }, [session, threads]);
 
   const loadPeers = useCallback(async (tok: string) => {
     const users = await fetchUsers(tok);
@@ -261,6 +280,7 @@ export default function App() {
 
     ws.onclose = (ev) => {
       setWsState('closed');
+      setOnlineIds(new Set());
       if (wsRef.current === ws) wsRef.current = null;
       // 4401 is what the server uses for auth errors in server/src/routes/ws.ts
       if (ev.code === 4401) {
@@ -276,34 +296,119 @@ export default function App() {
       // Browsers give little detail here; treat it as a hint, not a hard failure.
       setWsError((prev) => prev ?? 'WebSocket error');
     };
+    const processQueue = async () => {
+      if (isProcessing.current || messageQueue.current.length === 0) return;
+      isProcessing.current = true;
+      try {
+        while (messageQueue.current.length > 0) {
+          const rawMsg = messageQueue.current.shift()!;
+          if (rawMsg.type !== 'chat') continue;
+          
+          const msg = rawMsg as ChatMessage;
+          const peerId = peerIdForMessage(msg, session.userId);
+
+          if (msg.ciphertext && msg.header) {
+            if (msg.fromUserId === session.userId) {
+              setThreads((prev) => {
+                const list = prev[peerId] ?? [];
+                const idx = list.findIndex(m => m.id.startsWith('local-') && m.ciphertext === msg.ciphertext);
+                if (idx !== -1) {
+                  const newList = [...list];
+                  newList[idx] = { ...msg, text: list[idx].text ?? '' };
+                  return { ...prev, [peerId]: newList };
+                }
+                return prev;
+              });
+            } else {
+              try {
+                const myKeys = getKeys();
+                let currentState = getSession(peerId);
+                const x3dh = msg.header.x3dh;
+
+                if (x3dh) {
+                  console.log('🔄 X3DH header detected. Initializing/Resetting session for', peerId);
+                  let otpkPriv = null;
+                  if (x3dh.oneTimePreKeyId !== undefined) {
+                    const found = myKeys?.oneTimePreKeys.find((k: any) => k.id === x3dh.oneTimePreKeyId);
+                    if (found) otpkPriv = fromBase64(found.privateKeyB64);
+                  }
+                  
+                  const sharedSecret = initializeReceiverSession(
+                    fromBase64(myKeys.identityKey.privateKeyB64),
+                    fromBase64(myKeys.signedPreKey.privateKeyB64),
+                    otpkPriv,
+                    fromBase64(x3dh.identityKeyB64),
+                    fromBase64(x3dh.ephemeralKeyB64)
+                  );
+
+                  currentState = initializeRatchet(
+                    sharedSecret,
+                    false,
+                    fromBase64(x3dh.ephemeralKeyB64),
+                    {
+                      publicKey: fromBase64(myKeys.signedPreKey.publicKeyB64),
+                      privateKey: fromBase64(myKeys.signedPreKey.privateKeyB64),
+                    }
+                  );
+                }
+
+                if (currentState) {
+                  const text = await decryptMessage(
+                    currentState,
+                    {
+                      dhPublicKey: fromBase64(msg.header.dhPublicKeyB64),
+                      pn: msg.header.pn,
+                      n: msg.header.n,
+                    },
+                    msg.ciphertext,
+                    msg.header.ivB64
+                  );
+                  msg.text = text;
+                  saveSessionState(peerId, currentState);
+                } else {
+                  msg.text = '[Secure session not initialized]';
+                }
+              } catch (err) {
+                console.error('❌ Decryption failed:', err);
+                msg.text = '[Decryption failed]';
+              }
+
+              setThreads((prev) => {
+                const list = prev[peerId] ?? [];
+                if (list.some(m => m.id === msg.id)) return prev;
+                return { ...prev, [peerId]: [...list, msg] };
+              });
+            }
+          }
+
+          if (msg.fromUserId !== session.userId) {
+            setPeerList((prev) => {
+              if (prev.some((p) => p.id === msg.fromUserId)) return prev;
+              return [...prev, { id: msg.fromUserId, username: msg.fromUsername }];
+            });
+          }
+        }
+      } finally {
+        isProcessing.current = false;
+        if (messageQueue.current.length > 0) void processQueue();
+      }
+    };
 
     ws.onmessage = (ev) => {
-      let parsed: unknown;
+      let parsed: any;
       try {
         parsed = JSON.parse(String(ev.data));
-      } catch {
-        return;
-      }
+      } catch { return; }
       const msg = parsed as WsServerMessage;
+      
       if (msg.type === 'presence') {
         setOnlineIds(new Set(msg.online.map((x) => x.userId)));
         void loadPeers(session.token);
         return;
       }
       if (msg.type === 'chat') {
-        const peerId = peerIdForMessage(msg, session.userId);
-        setThreads((prev) => {
-          const list = prev[peerId] ?? [];
-          if (list.some((m) => m.id === msg.id)) return prev;
-          return { ...prev, [peerId]: [...list, msg] };
-        });
-        if (msg.fromUserId !== session.userId) {
-          setPeerList((prev) => {
-            if (prev.some((p) => p.id === msg.fromUserId)) return prev;
-            return [...prev, { id: msg.fromUserId, username: msg.fromUsername }];
-          });
-        }
-        return;
+        messageQueue.current.push(msg);
+        void processQueue();
       }
       if (msg.type === 'error') {
         setWsError(msg.message);
@@ -350,7 +455,6 @@ export default function App() {
       setBusy(false);
     }
   };
-
   const logout = () => {
     setSession(null);
     clearSession();
@@ -361,13 +465,122 @@ export default function App() {
     setWsError(null);
   };
 
-  const sendChat = () => {
+  const getKeys = useCallback(() => {
+    if (!session) return null;
+    const raw = localStorage.getItem(`signal-keys-${session.userId}`);
+    return raw ? JSON.parse(raw) : null;
+  }, [session]);
+
+  const getSession = useCallback((peerId: string): RatchetState | null => {
+    if (!session) return null;
+    const raw = localStorage.getItem(`${SESSION_PREFIX}${session.userId}-${peerId}`);
+    return raw ? deserializeRatchetState(raw) : null;
+  }, [session]);
+
+  const saveSessionState = useCallback((peerId: string, state: RatchetState) => {
+    if (!session) return;
+    localStorage.setItem(`${SESSION_PREFIX}${session.userId}-${peerId}`, serializeRatchetState(state));
+  }, [session]);
+
+  const sendChat = async () => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN || !recipientId) return;
+    console.log('🔘 sendChat clicked', { wsReady: ws?.readyState, recipientId, session: !!session });
+    if (!ws || ws.readyState !== WebSocket.OPEN || !recipientId || !session) {
+      console.warn('⚠️ sendChat aborted: prerequisites not met');
+      return;
+    }
     const text = draft.trim();
     if (!text) return;
-    ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, text }));
-    setDraft('');
+
+    try {
+      console.log('🚀 Attempting to send message to:', recipientId);
+      const myKeys = getKeys();
+      if (!myKeys) throw new Error('Local keys not found. Please re-login.');
+
+      let ratchetState = getSession(recipientId);
+      let x3dhHeader = undefined;
+
+      if (!ratchetState) {
+        console.log('🔄 No session found. Starting X3DH handshake with', recipientId);
+        const bundle = await fetchPreKeyBundle(session.token, recipientId);
+        console.log('📦 Fetched PreKey bundle for', recipientId);
+        
+        const ek = generateOneTimePreKeyPair();
+        const handshake = initializeSenderSession(
+          fromBase64(myKeys.identityKey.privateKeyB64),
+          {
+            identityPublicKey: fromBase64(bundle.identityKey.publicKeyB64),
+            signedPreKeyPublicKey: fromBase64(bundle.signedPreKey.publicKeyB64),
+            signedPreKeySignature: fromBase64(bundle.signedPreKey.signatureB64),
+            oneTimePreKeyId: bundle.oneTimePreKey?.id.toString(),
+            oneTimePreKeyPublicKey: bundle.oneTimePreKey ? fromBase64(bundle.oneTimePreKey.publicKeyB64) : undefined,
+          },
+          ek
+        );
+
+        ratchetState = initializeRatchet(
+          handshake.sharedSecret,
+          true,
+          fromBase64(bundle.signedPreKey.publicKeyB64),
+          ek
+        );
+
+        x3dhHeader = {
+          identityKeyB64: myKeys.identityKey.publicKeyB64,
+          ephemeralKeyB64: toBase64(ek.publicKey),
+          oneTimePreKeyId: bundle.oneTimePreKey?.id,
+        };
+        console.log('✅ X3DH Handshake initialized.');
+      }
+
+      console.log('🔒 Encrypting message...');
+      const { ciphertextB64, ivB64, header } = await encryptMessage(ratchetState, text);
+      
+      const payload = {
+        type: 'chat',
+        toUserId: recipientId,
+        ciphertext: ciphertextB64,
+        header: {
+          ...header,
+          dhPublicKeyB64: toBase64(header.dhPublicKey),
+          ivB64,
+          x3dh: x3dhHeader,
+        }
+      };
+      
+      ws.send(JSON.stringify(payload));
+      console.log('📤 Encrypted message sent via WebSocket.');
+
+      // Add to local thread immediately so the sender sees it
+      const localMsg: ChatMessage = {
+        type: 'chat',
+        id: `local-${Date.now()}`,
+        fromUserId: session.userId,
+        fromUsername: session.username,
+        toUserId: recipientId,
+        text,
+        ciphertext: ciphertextB64,
+        header: {
+          dhPublicKeyB64: toBase64(header.dhPublicKey),
+          pn: header.pn,
+          n: header.n,
+          ivB64,
+          x3dh: x3dhHeader,
+        },
+        sentAt: new Date().toISOString(),
+      };
+
+      setThreads((prev) => {
+        const list = prev[recipientId] ?? [];
+        return { ...prev, [recipientId]: [...list, localMsg] };
+      });
+
+      saveSessionState(recipientId, ratchetState);
+      setDraft('');
+    } catch (err) {
+      console.error('❌ Failed to send encrypted message:', err);
+      setWsError(err instanceof Error ? `Send failed: ${err.message}` : 'Encryption error');
+    }
   };
 
   const sortedPeers = useMemo(
@@ -394,12 +607,76 @@ export default function App() {
     setRecipientId(id);
     setDraft('');
     if (!session) return;
+
     fetchConversation(session.token, id)
-      .then((msgs) => {
-        setThreads((prev) => ({ ...prev, [id]: msgs as ChatMessage[] }));
+      .then(async (msgs) => {
+        setThreads((prev) => {
+          const existing = prev[id] ?? [];
+          
+          // Merge new messages with existing ones
+          const merged = [...existing];
+          for (const m of msgs) {
+            if (!merged.some((em) => em.id === m.id)) {
+              merged.push(m as ChatMessage);
+            }
+          }
+
+          // Sort by sentAt
+          merged.sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
+
+          // Try to decrypt any messages that don't have text yet
+          // BUT: We do this carefully to avoid advancing the LIVE ratchet state.
+          // In this simplified implementation, we only decrypt if the message 
+          // matches the CURRENT ratchet state's expected next index or is in skipped keys.
+          // For now, we'll just decrypt what we can and if it fails, it fails.
+          // The key fix is that we don't OVERWRITE already decrypted messages.
+          
+          void (async () => {
+            const ratchetState = getSession(id);
+            if (!ratchetState) return;
+
+            // We use a CLONE of the state for history decryption to avoid 
+            // corrupting the live session if history contains already-processed messages.
+            const historyRatchet = deserializeRatchetState(serializeRatchetState(ratchetState));
+            let updated = false;
+
+            const finalMsgs = await Promise.all(merged.map(async (m) => {
+              if (m.ciphertext && m.header && !m.text && m.fromUserId !== session.userId) {
+                try {
+                  const plaintext = await decryptMessage(
+                    historyRatchet,
+                    {
+                      dhPublicKey: fromBase64(m.header.dhPublicKeyB64),
+                      pn: m.header.pn,
+                      n: m.header.n,
+                    },
+                    m.ciphertext,
+                    m.header.ivB64
+                  );
+                  updated = true;
+                  return { ...m, text: plaintext };
+                } catch (err) {
+                  // If history decryption fails, it's likely because the ratchet has moved 
+                  // past these messages. This is normal for a forward-secure protocol.
+                  console.warn('Could not decrypt historical message', m.id, err);
+                  return m;
+                }
+              }
+              return m;
+            }));
+
+            if (updated) {
+              setThreads((current) => ({ ...current, [id]: finalMsgs }));
+              // DO NOT save historyRatchet back to localStorage. 
+              // Only live messages should advance the stored state.
+            }
+          })();
+
+          return { ...prev, [id]: merged };
+        });
       })
-      .catch(() => {
-        // If history fails to load, keep UI responsive; WS will still deliver new messages.
+      .catch((err) => {
+        console.error('Failed to fetch conversation:', err);
       });
   };
 
@@ -409,7 +686,7 @@ export default function App() {
         <div className="auth-topbar">
           <div>
             <h1>Signal Instant Messaging</h1>
-            <p className="tagline">Messages are not end-to-end encrypted yet.</p>
+            <p className="tagline">Secure End-to-End Encrypted Messaging.</p>
           </div>
           <button
             type="button"
@@ -582,12 +859,28 @@ export default function App() {
           ) : (
             <>
               <div className="chat-head">
-                <h2 className="chat-title">{activePeerName ?? 'Chat'}</h2>
-                {activePeerName && (
-                  <p className={activePeerOnline ? 'chat-sub online' : 'chat-sub offline'}>
-                    {activePeerOnline ? 'Online' : 'Offline'}
-                  </p>
-                )}
+                <div className="chat-head-main">
+                  <h2 className="chat-title">{activePeerName ?? 'Chat'}</h2>
+                  {activePeerName && (
+                    <p className={activePeerOnline ? 'chat-sub online' : 'chat-sub offline'}>
+                      {activePeerOnline ? 'Online' : 'Offline'}
+                    </p>
+                  )}
+                </div>
+                <button 
+                  type="button" 
+                  className="ghost danger-text" 
+                  style={{ fontSize: '0.8rem' }}
+                  onClick={() => {
+                    if (confirm('This will reset your secure session with this user. Use this if you are seeing decryption errors. Continue?')) {
+                      localStorage.removeItem(`${SESSION_PREFIX}${session.userId}-${recipientId}`);
+                      setThreads(prev => ({ ...prev, [recipientId]: [] }));
+                      window.location.reload();
+                    }
+                  }}
+                >
+                  Reset Session
+                </button>
               </div>
               <div className="thread">
                 {activeMessages.length === 0 && (
@@ -608,6 +901,7 @@ export default function App() {
                         <div className="meta">
                           {mine ? 'You' : m.fromUsername} ·{' '}
                           {new Date(m.sentAt).toLocaleTimeString()}
+                          {m.ciphertext && ' · 🔒 E2EE'}
                         </div>
                         <div className="text">{m.text}</div>
                       </div>

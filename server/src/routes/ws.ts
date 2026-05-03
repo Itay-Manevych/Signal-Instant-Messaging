@@ -19,6 +19,7 @@ function broadcastPresence(
     const u = store.getById(id);
     return u ? [{ userId: u.id, username: u.username }] : [];
   });
+  console.log(`📢 Broadcasting presence: ${online.length} users online.`, online.map(u => u.username));
   const payload: WsServerMessage = { type: 'presence', online };
   for (const id of hub.onlineUserIds()) {
     hub.sendTo(id, payload);
@@ -68,13 +69,23 @@ export function registerWsRoutes(
     broadcastPresence(hub, store);
 
     // Flush queued messages for this user (offline delivery).
-    const pending = store.listPendingMessagesForUser(userId);
+    const pending = store.listPendingMessages(userId);
     if (pending.length > 0) {
       for (const msg of pending) {
-        const out: WsServerMessage = { type: 'chat', ...msg };
+        const out: WsServerMessage = {
+          type: 'chat',
+          id: msg.id,
+          fromUserId: msg.fromUserId,
+          fromUsername: msg.fromUsername,
+          toUserId: msg.toUserId,
+          text: msg.text,
+          ciphertext: msg.ciphertext,
+          header: msg.headerJson ? JSON.parse(msg.headerJson) : undefined,
+          sentAt: msg.sentAt,
+        };
         socket.send(JSON.stringify(out));
       }
-      store.deletePendingMessages(pending.map((m) => m.id));
+      store.deletePendingMessages(pending.map((m: any) => m.id));
     }
 
     socket.on('message', (raw: WebSocket.RawData) => {
@@ -102,16 +113,20 @@ export function registerWsRoutes(
 
       if (msg.type === 'chat') {
         const toUserId = typeof msg.toUserId === 'string' ? msg.toUserId : '';
-        const text = typeof msg.text === 'string' ? msg.text : '';
-        if (!toUserId || !text.trim()) {
+        const text = msg.text;
+        const ciphertext = msg.ciphertext;
+        const header = msg.header;
+
+        if (!toUserId || (!text?.trim() && !ciphertext)) {
           const err: WsServerMessage = {
             type: 'error',
-            message: 'chat requires non-empty toUserId and text',
+            message: 'chat requires toUserId and either text or ciphertext',
           };
           socket.send(JSON.stringify(err));
           return;
         }
-        if (text.length > 16_384) {
+
+        if (text && text.length > 16_384) {
           const err: WsServerMessage = {
             type: 'error',
             message: 'Message too long',
@@ -119,6 +134,7 @@ export function registerWsRoutes(
           socket.send(JSON.stringify(err));
           return;
         }
+
         if (toUserId === userId) {
           const err: WsServerMessage = {
             type: 'error',
@@ -127,6 +143,7 @@ export function registerWsRoutes(
           socket.send(JSON.stringify(err));
           return;
         }
+
         const peer = store.getById(toUserId);
         if (!peer) {
           const err: WsServerMessage = {
@@ -143,19 +160,34 @@ export function registerWsRoutes(
           fromUsername: user.username,
           toUserId,
           text,
+          ciphertext,
+          headerJson: header ? JSON.stringify(header) : undefined,
           sentAt: new Date().toISOString(),
         };
 
-        // Persist message history regardless of recipient online state.
+        // Persist message history
         store.saveMessage(out);
 
-        // Always echo to sender.
-        hub.sendTo(userId, { type: 'chat', ...out } satisfies WsServerMessage);
+        // Prepare server broadcast payload
+        const broadcast: WsServerMessage = {
+          type: 'chat',
+          id: out.id,
+          fromUserId: out.fromUserId,
+          fromUsername: out.fromUsername,
+          toUserId: out.toUserId,
+          text: out.text,
+          ciphertext: out.ciphertext,
+          header: header,
+          sentAt: out.sentAt,
+        };
 
-        // If recipient is online, deliver immediately; otherwise enqueue for later.
-        const delivered = hub.sendTo(toUserId, { type: 'chat', ...out } satisfies WsServerMessage);
+        // Echo to sender
+        hub.sendTo(userId, broadcast);
+
+        // Deliver to recipient
+        const delivered = hub.sendTo(toUserId, broadcast);
         if (!delivered) {
-          store.enqueuePendingMessage(out);
+          store.savePendingMessage(out);
         }
         return;
       }

@@ -99,7 +99,9 @@ export async function fetchConversation(token: string, peerId: string) {
     fromUserId: string;
     fromUsername: string;
     toUserId: string;
-    text: string;
+    text?: string;
+    ciphertext?: string;
+    header?: any;
     sentAt: string;
   }[];
 }
@@ -123,4 +125,20 @@ export async function publishKeys(
     throw new Error(data?.error || `HTTP ${r.status}`);
   }
   return (await r.json()) as { ok: boolean };
+}
+
+export async function fetchPreKeyBundle(token: string, userIdOrName: string) {
+  const r = await fetch(`/api/keys/bundle/${encodeURIComponent(userIdOrName)}`, { headers: headers(token) });
+  const data = (await r.json()) as unknown;
+  if (!r.ok) {
+    const err =
+      data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
+        ? (data as { error: string }).error
+        : `HTTP ${r.status}`;
+    throw new Error(err);
+  }
+  if (!data || typeof data !== 'object' || !('bundle' in data)) {
+    throw new Error('Invalid bundle response');
+  }
+  return (data as any).bundle;
 }
