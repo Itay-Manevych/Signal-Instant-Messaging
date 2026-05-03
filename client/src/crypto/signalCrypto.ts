@@ -1,7 +1,5 @@
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import { hkdf } from '@noble/hashes/hkdf.js';
-import { hmac } from '@noble/hashes/hmac.js';
-import { sha256, sha512 } from '@noble/hashes/sha2.js';
+import { sha512 } from '@noble/hashes/sha2.js';
 
 const Fp = ed25519.Point.Fp;
 const Q = ed25519.Point.Fn.ORDER;
@@ -45,28 +43,19 @@ function concat(parts: Uint8Array[]): Uint8Array {
 export function edPublicFromMontgomery(publicKey: Uint8Array): InstanceType<typeof ed25519.Point> {
   const u = leToInt(publicKey);
   if (u >= Fp.ORDER) throw new Error('Invalid X25519 public key');
-  // y = (u - 1) / (u + 1)
   const y = Fp.div(Fp.sub(u, 1n), Fp.add(u, 1n));
   const encoded = Fp.toBytes(y);
-  // Signal spec: the sign bit is always 0 for XEdDSA public keys
   encoded[31] &= 127;
   return ed25519.Point.fromBytes(encoded);
 }
 
-/** 
- * XEdDSA Key Pair derivation from X25519 private key 
- */
 function xeddsaKeyPair(privateKey: Uint8Array) {
   const k = leToInt(privateKey) % Q;
   if (k === 0n) throw new Error('Invalid X25519 private key');
-  
   const point = ed25519.Point.BASE.multiply(k);
   const encoded = point.toBytes();
-  
-  // If the sign bit is 1, we negate the scalar to keep the public key the same but with sign bit 0
   const a = (encoded[31] & 128) === 0 ? k : (Q - k) % Q;
   encoded[31] &= 127;
-  
   return { publicKey: encoded, privateScalar: a };
 }
 
@@ -74,21 +63,13 @@ export function calculateX25519(privateKey: Uint8Array, publicKey: Uint8Array): 
   return x25519.getSharedSecret(privateKey, publicKey);
 }
 
-/**
- * Deterministic XEdDSA signing
- */
 export function sign(privateKey: Uint8Array, message: Uint8Array): Uint8Array {
   const { publicKey, privateScalar } = xeddsaKeyPair(privateKey);
-  
-  // Deterministic nonce derivation per XEdDSA spec
-  // r = hash(prefix || a || M || Z)
   const Z = new Uint8Array(64).fill(0);
   const r = hashModQ(XED25519_PREFIX, intToLe(privateScalar), message, Z);
-  
   const rPoint = ed25519.Point.BASE.multiply(r).toBytes();
   const h = hashModQ(rPoint, publicKey, message);
   const s = (r + h * privateScalar) % Q;
-
   return concat([rPoint, intToLe(s)]);
 }
 
@@ -97,36 +78,38 @@ export function verify(publicKeyB64: Uint8Array, message: Uint8Array, signature:
     if (signature.length !== 64) return false;
     const rPointBytes = signature.subarray(0, 32);
     const s = leToInt(signature.subarray(32));
-    if (s >= (1n << 253n)) return false; // Basic bounds check
-
+    if (s >= (1n << 253n)) return false;
     const publicKey = edPublicFromMontgomery(publicKeyB64);
     const h = hashModQ(rPointBytes, publicKey.toBytes(), message);
-    
-    // Check: R = s*B - h*P
     const check = ed25519.Point.BASE.multiply(s % Q)
       .subtract(publicKey.multiply(h))
       .toBytes();
-      
     return compare(check, rPointBytes);
   } catch {
     return false;
   }
 }
 
-function compare(a: Uint8Array, b: Uint8Array): boolean {
+export function compare(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
 
-export function hkdfSha256(keyMaterial: Uint8Array, salt?: Uint8Array, info?: Uint8Array, length = 32): Uint8Array {
-  return hkdf(sha256, keyMaterial, salt || new Uint8Array(32).fill(0), info, length);
+export function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
 }
 
-export function hmacSha256(key: Uint8Array, message: Uint8Array): Uint8Array {
-  return hmac(sha256, key, message);
+export function fromBase64(base64: string): Uint8Array {
+  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
 
 export function randomBytes(length: number): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(length));
 }
+
+// Re-exports for backward compatibility
+export { aesEncrypt, aesDecrypt } from './aes';
+export { hkdfSha256, hmacSha256 } from './kdf';
