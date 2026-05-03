@@ -10,6 +10,4 @@
 coverage/
 
 # Database
-*.sqlite
-*.sqlite-*
 *.backup-*
