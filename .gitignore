@@ -8,3 +8,8 @@
 .DS_Store
 *.log
 coverage/
+
+# Database
+*.sqlite
+*.sqlite-*
+*.backup-*
