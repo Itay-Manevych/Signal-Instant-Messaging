@@ -1,0 +1,233 @@
+@import './global.css';
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.tagline {
+  margin: 0 0 0.4rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.status-line {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.status-line .ok {
+  color: var(--ok);
+}
+
+.status-line .warn {
+  color: var(--warn);
+}
+
+.chat-layout {
+  display: grid;
+  grid-template-columns: 18rem 1fr;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+@media (max-width: 900px) {
+  .chat-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 40rem;
+}
+
+.sidebar-head {
+  margin-bottom: 0.75rem;
+}
+
+.user-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.user-list li {
+  margin-bottom: 0.35rem;
+}
+
+.user-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  justify-content: space-between;
+  text-align: left;
+  border: 1px solid var(--card-border);
+  background: var(--panel);
+  color: var(--text);
+  padding: 0.45rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.user-pick.active {
+  border-color: var(--primary);
+  background: var(--active-bg);
+}
+
+.user-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+
+.user-state {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.user-state.online {
+  color: var(--ok);
+}
+
+.user-state.offline {
+  color: var(--muted2);
+}
+
+.dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+}
+
+.dot.online {
+  background: var(--online-dot);
+}
+
+.dot.offline {
+  background: var(--offline-dot);
+}
+
+.chat-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 40rem;
+}
+
+.chat-head {
+  margin-bottom: 0.75rem;
+}
+
+.chat-title {
+  margin: 0;
+}
+
+.chat-sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.chat-sub.online {
+  color: var(--ok);
+}
+
+.chat-sub.offline {
+  color: var(--muted2);
+}
+
+.empty-chat {
+  height: 100%;
+  min-height: 22rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border: 1px dashed var(--card-border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  background: var(--panel);
+}
+
+.thread {
+  flex: 1;
+  min-height: 12rem;
+  overflow-y: auto;
+  padding: 0.75rem;
+  background: var(--panel);
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  margin-bottom: 0.75rem;
+}
+
+.day-sep {
+  display: flex;
+  justify-content: center;
+  margin: 0.9rem 0;
+}
+
+.day-sep span {
+  font-size: 0.8rem;
+  color: var(--muted);
+  padding: 0.25rem 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+}
+
+.bubble {
+  margin-bottom: 0.65rem;
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+}
+
+.bubble.mine {
+  border-color: var(--mine-border);
+  background: var(--mine-bg);
+}
+
+.bubble .meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+
+.bubble .text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.composer {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.composer input {
+  flex: 1;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--input);
+  color: var(--text);
+}

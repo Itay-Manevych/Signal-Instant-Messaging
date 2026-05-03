@@ -1,4 +1,5 @@
-
+import { deserializeRatchetState, serializeRatchetState, type RatchetState } from './crypto/doubleRatchet';
+import type { Session, Theme, ChatMessage } from './types';
 
 export const SunIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -19,3 +20,75 @@ export const formatDayLabel = (iso: string) => {
   if (dayKey(iso) === dayKey(now.toISOString())) return 'Today';
   return d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
 };
+
+const SESSION_PREFIX = 'signal-session-';
+
+export function getSession(peerId: string): RatchetState | null {
+  const data = localStorage.getItem(SESSION_PREFIX + peerId);
+  return data ? deserializeRatchetState(data) : null;
+}
+
+export function saveSessionState(peerId: string, state: RatchetState) {
+  localStorage.setItem(SESSION_PREFIX + peerId, serializeRatchetState(state));
+}
+
+export function getKeys(userId: string) {
+  const raw = localStorage.getItem(`signal-keys-${userId}`);
+  return raw ? JSON.parse(raw) : null;
+}
+
+const TOKEN_KEY = 'signal-im-token';
+const USER_KEY = 'signal-im-user';
+const THEME_KEY = 'signal-im-theme';
+
+export function loadSession(): Session | null {
+  try {
+    const raw = sessionStorage.getItem(USER_KEY);
+    const token = sessionStorage.getItem(TOKEN_KEY);
+    if (!raw || !token) return null;
+    const u = JSON.parse(raw) as { userId: string; username: string };
+    if (!u.userId || !u.username) return null;
+    return { token, userId: u.userId, username: u.username };
+  } catch {
+    return null;
+  }
+}
+
+export function saveSession(s: Session) {
+  sessionStorage.setItem(TOKEN_KEY, s.token);
+  sessionStorage.setItem(
+    USER_KEY,
+    JSON.stringify({ userId: s.userId, username: s.username }),
+  );
+}
+
+export function clearSession() {
+  sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(USER_KEY);
+}
+
+export function loadTheme(): Theme | null {
+  try {
+    const raw = localStorage.getItem(THEME_KEY);
+    return raw === 'light' || raw === 'dark' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveTheme(theme: Theme) {
+  localStorage.setItem(THEME_KEY, theme);
+}
+
+export function loadThreads(userId: string): Record<string, ChatMessage[]> {
+  try {
+    const raw = localStorage.getItem(`signal-threads-${userId}`);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveThreads(userId: string, threads: Record<string, ChatMessage[]>) {
+  localStorage.setItem(`signal-threads-${userId}`, JSON.stringify(threads));
+}

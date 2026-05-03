@@ -1,13 +1,14 @@
 import { useState } from 'react';
-import type { Session } from './types';
+import type { Session, Theme } from './types';
+import './styles/Auth.css';
 
 interface AuthProps {
   busy: boolean;
   error: string | null;
   onLogin: (u: string, p: string) => void;
   onRegister: (u: string, p: string) => void;
-  theme: 'dark' | 'light';
-  setTheme: (t: 'dark' | 'light') => void;
+  theme: Theme;
+  setTheme: (t: Theme) => void;
   savedSession: Session | null;
   setSession: (s: Session) => void;
   clearSession: () => void;
