@@ -13,6 +13,20 @@ export type PendingChatMessage = {
   sentAt: string;
 };
 
+export type SignedPreKeyPublic = {
+  publicKeyB64: string;
+  signatureB64: string;
+};
+
+export type PreKeyBundle = {
+  identityKey: IdentityKeyPublic;
+  signedPreKey: SignedPreKeyPublic;
+  oneTimePreKey?: {
+    id: number;
+    publicKeyB64: string;
+  };
+};
+
 type UserRecord = {
   id: string;
   username: string;
@@ -101,6 +115,14 @@ export class UserStore {
     return rows;
   }
 
+  getIdByUsername(username: string): string | null {
+    const normalized = this.normalizeUsername(username);
+    const row = this.db
+      .prepare('SELECT id FROM users WHERE username_norm = ? LIMIT 1')
+      .get(normalized) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
   upsertIdentityKey(userId: string, key: IdentityKeyPublic): void {
     this.db
       .prepare(
@@ -136,6 +158,85 @@ export class UserStore {
     if (!row) return null;
     if (row.keyType !== 'x25519') return null;
     return { keyType: 'x25519', publicKeyB64: row.publicKeyB64 };
+  }
+
+  upsertSignedPreKey(userId: string, key: SignedPreKeyPublic): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO signed_prekeys (user_id, public_key_b64, signature_b64, created_at)
+        VALUES (@user_id, @public_key_b64, @signature_b64, @created_at)
+        ON CONFLICT(user_id)
+        DO UPDATE SET
+          public_key_b64 = excluded.public_key_b64,
+          signature_b64 = excluded.signature_b64,
+          created_at = excluded.created_at
+      `,
+      )
+      .run({
+        user_id: userId,
+        public_key_b64: key.publicKeyB64,
+        signature_b64: key.signatureB64,
+        created_at: new Date().toISOString(),
+      });
+  }
+
+  addOneTimePreKeys(userId: string, publicKeysB64: string[]): void {
+    const insert = this.db.prepare(`
+      INSERT INTO one_time_prekeys (user_id, public_key_b64, created_at)
+      VALUES (?, ?, ?)
+    `);
+
+    const createdAt = new Date().toISOString();
+    const transaction = this.db.transaction((keys: string[]) => {
+      for (const key of keys) {
+        insert.run(userId, key, createdAt);
+      }
+    });
+
+    transaction(publicKeysB64);
+  }
+
+  getPreKeyBundle(userId: string): PreKeyBundle | null {
+    const identityKey = this.getIdentityKey(userId);
+    if (!identityKey) return null;
+
+    const signedPreKey = this.db
+      .prepare(
+        `
+        SELECT public_key_b64 AS publicKeyB64, signature_b64 AS signatureB64
+        FROM signed_prekeys
+        WHERE user_id = ?
+        LIMIT 1
+      `,
+      )
+      .get(userId) as SignedPreKeyPublic | undefined;
+
+    if (!signedPreKey) return null;
+
+    // Fetch one random one-time prekey
+    const otpk = this.db
+      .prepare(
+        `
+        SELECT id, public_key_b64 AS publicKeyB64
+        FROM one_time_prekeys
+        WHERE user_id = ?
+        ORDER BY RANDOM()
+        LIMIT 1
+      `,
+      )
+      .get(userId) as { id: number; publicKeyB64: string } | undefined;
+
+    // If we found one, delete it so it's truly "one-time"
+    if (otpk) {
+      this.db.prepare(`DELETE FROM one_time_prekeys WHERE id = ?`).run(otpk.id);
+    }
+
+    return {
+      identityKey,
+      signedPreKey,
+      oneTimePreKey: otpk,
+    };
   }
 
   saveMessage(msg: PendingChatMessage): void {

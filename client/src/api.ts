@@ -103,3 +103,24 @@ export async function fetchConversation(token: string, peerId: string) {
     sentAt: string;
   }[];
 }
+
+export async function publishKeys(
+  token: string,
+  bundle: {
+    identityKeyB64: string;
+    signedPreKeyB64: string;
+    signedPreKeySignatureB64: string;
+    oneTimePreKeysB64: string[];
+  }
+) {
+  const r = await fetch('/api/keys/publish', {
+    method: 'POST',
+    headers: headers(token),
+    body: JSON.stringify(bundle),
+  });
+  if (!r.ok) {
+    const data = (await r.json()) as any;
+    throw new Error(data?.error || `HTTP ${r.status}`);
+  }
+  return (await r.json()) as { ok: boolean };
+}

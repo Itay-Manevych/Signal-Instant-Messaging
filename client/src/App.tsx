@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
-import { fetchConversation, fetchUsers, login, register } from './api';
+import { fetchConversation, fetchUsers, login, publishKeys, register } from './api';
 import type { WsServerMessage } from './protocol';
+import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64 } from './crypto/signalKeys';
+import { sign } from './crypto/signalCrypto';
 
 const TOKEN_KEY = 'signal-im-token';
 const USER_KEY = 'signal-im-user';
@@ -128,6 +130,7 @@ export default function App() {
   });
 
   const wsRef = useRef<WebSocket | null>(null);
+  const enrollingRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -162,6 +165,76 @@ export default function App() {
       cancelled = true;
     };
   }, [session, loadPeers]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    const KEY_STORAGE_PREFIX = `signal-keys-${session.userId}`;
+    const stored = localStorage.getItem(KEY_STORAGE_PREFIX);
+
+    if (stored) {
+      console.log('✅ Keys already exist in localStorage for', session.username);
+      return;
+    }
+
+    if (enrollingRef.current) return;
+    enrollingRef.current = true;
+
+    console.log('🚀 No keys found. Starting Automated Enrollment for', session.username);
+
+    const enroll = async () => {
+      try {
+        // 1. Generate local keys
+        const ik = generateIdentityKeyPair();
+        const spk = generateSignedPreKeyPair();
+        const sig = sign(ik.privateKey, spk.publicKey);
+
+        const opks: { id: number; publicKey: Uint8Array; privateKey: Uint8Array }[] = [];
+        for (let i = 0; i < 50; i++) {
+          const pair = generateOneTimePreKeyPair();
+          opks.push({ id: i, ...pair });
+        }
+
+        const fullState = {
+          identityKey: {
+            publicKeyB64: toBase64(ik.publicKey),
+            privateKeyB64: toBase64(ik.privateKey),
+          },
+          signedPreKey: {
+            publicKeyB64: toBase64(spk.publicKey),
+            privateKeyB64: toBase64(spk.privateKey),
+            signatureB64: toBase64(sig),
+          },
+          oneTimePreKeys: opks.map((o) => ({
+            id: o.id,
+            publicKeyB64: toBase64(o.publicKey),
+            privateKeyB64: toBase64(o.privateKey),
+          })),
+        };
+
+        // 2. Publish public components to server FIRST
+        // If this fails, we catch it and don't save to localStorage, 
+        // allowing the effect to retry on the next session trigger.
+        await publishKeys(session.token, {
+          identityKeyB64: fullState.identityKey.publicKeyB64,
+          signedPreKeyB64: fullState.signedPreKey.publicKeyB64,
+          signedPreKeySignatureB64: fullState.signedPreKey.signatureB64,
+          oneTimePreKeysB64: fullState.oneTimePreKeys.map((o) => o.publicKeyB64),
+        });
+
+        // 3. Save private + public keys to localStorage ONLY after success
+        localStorage.setItem(KEY_STORAGE_PREFIX, JSON.stringify(fullState));
+
+        console.log('✨ Enrollment successful: Public keys published for', session.username);
+      } catch (err) {
+        console.error('❌ Enrollment failed:', err);
+      } finally {
+        enrollingRef.current = false;
+      }
+    };
+
+    void enroll();
+  }, [session]);
 
   useEffect(() => {
     if (!session) {

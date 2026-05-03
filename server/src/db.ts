@@ -36,6 +36,22 @@ export function migrate(db: Db): void {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS signed_prekeys (
+      user_id TEXT PRIMARY KEY,
+      public_key_b64 TEXT NOT NULL,
+      signature_b64 TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS one_time_prekeys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      public_key_b64 TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     -- Plain transport message history (pre-E2EE). Once Double Ratchet lands,
     -- store encrypted payloads here instead of plaintext.
     CREATE TABLE IF NOT EXISTS messages (
