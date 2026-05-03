@@ -48,7 +48,7 @@ function testX3DH() {
     console.log("🔑 Bob's Shared Secret:  ", bobSecretB64);
 
     if (aliceSecretB64 === bobSecretB64) {
-      console.log("✅ SUCCESS: Secrets match! The X3DH handshake is 100% compliant.");
+      console.log("✅ SUCCESS: Shared secrets match (DH + X3DH KDF per Signal spec §2.2).");
       process.exit(0);
     } else {
       console.error("❌ FAILURE: Shared secrets do not match.");

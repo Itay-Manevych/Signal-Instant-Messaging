@@ -1,8 +1,10 @@
-import { ed25519, x25519 } from '@noble/curves/ed25519.js';
+import { x25519 } from '@noble/curves/ed25519.js';
 
-/** Helpers for Base64 conversion (Web-compatible) */
+/** Helpers for Base64 conversion (Web-compatible). Loop avoids TS spread quirks on iterable targets. */
 export function toBase64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
 }
 
 export function fromBase64(base64: string): Uint8Array {

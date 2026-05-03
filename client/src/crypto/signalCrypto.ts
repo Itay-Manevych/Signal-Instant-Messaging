@@ -42,7 +42,7 @@ function concat(parts: Uint8Array[]): Uint8Array {
   return res;
 }
 
-export function edPublicFromMontgomery(publicKey: Uint8Array): ed25519.Point {
+export function edPublicFromMontgomery(publicKey: Uint8Array): InstanceType<typeof ed25519.Point> {
   const u = leToInt(publicKey);
   if (u >= Fp.ORDER) throw new Error('Invalid X25519 public key');
   // y = (u - 1) / (u + 1)

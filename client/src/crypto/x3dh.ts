@@ -1,21 +1,34 @@
-import { calculateX25519, hkdfSha256, sign, verify } from './signalCrypto';
+import { calculateX25519, hkdfSha256, verify } from './signalCrypto';
 import { generateEphemeralKeyPair } from './signalKeys';
 
-const X3DH_INFO = new TextEncoder().encode('X3DH');
-
 /**
- * Signal X3DH KDF: SK = HKDF(DH1 || DH2 || DH3 || DH4)
- * Note: DH4 is optional if One-Time Pre-Key is not used.
+ * You already computed several Diffie-Hellman results (three or four blobs, each 32 bytes).
+ *
+ * Plain English: push those blobs through HKDF (a standard “mix-down” function), not XOR or
+ * concat alone—that step is called the X3DH key derivation function (X3DH KDF). You get back
+ * one 32-byte key `SK`.
+ *
+ * Concretely, HKDF is fed:
+ *   input  = thirty-two 0xFF bytes glued in front of (DH₁ ‖ DH₂ ‖ DH₃ [, DH₄]),
+ *   salt   = 32 zero bytes when using HKDF‑SHA‑256,
+ *   label  = the ASCII bytes of "WhisperText" — Signal chooses that label here.
+ *
+ * Full normative wording: Signal’s X3DH spec §2.2 (“KDF(KM)”).
+ * URL: https://signal.org/docs/specifications/x3dh/
  */
+const X25519_HKDF_DISCONTINUITY = new Uint8Array(32).fill(0xff);
+const X3DH_HKDF_INFO = new TextEncoder().encode('WhisperText');
+
 function signalKdf(dhValues: Uint8Array[]): Uint8Array {
-  const totalLength = dhValues.reduce((acc, v) => acc + v.length, 0);
-  const keyMaterial = new Uint8Array(totalLength);
-  let offset = 0;
+  const kmLen = dhValues.reduce((acc, v) => acc + v.length, 0);
+  const keyMaterial = new Uint8Array(X25519_HKDF_DISCONTINUITY.length + kmLen);
+  keyMaterial.set(X25519_HKDF_DISCONTINUITY, 0);
+  let offset = X25519_HKDF_DISCONTINUITY.length;
   for (const v of dhValues) {
     keyMaterial.set(v, offset);
     offset += v.length;
   }
-  return hkdfSha256(keyMaterial, undefined, X3DH_INFO);
+  return hkdfSha256(keyMaterial, undefined, X3DH_HKDF_INFO);
 }
 
 export interface PreKeyBundle {
