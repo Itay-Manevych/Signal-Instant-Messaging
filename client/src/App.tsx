@@ -8,6 +8,8 @@ import { createDevEnvelope, devBase64ToUtf8, loadSenderIdentityKeyB64 } from './
 import { normalizeLocalOneTimePreKeyIds } from './crypto/localOneTimePreKeys';
 import { getSession, listSessions } from './crypto/sessionManager';
 import { protocolLog, protocolWarn, shortId } from './crypto/protocolLog';
+import { handleInitialEnvelope } from './crypto/handleInitialEnvelope';
+import { startSenderSession } from './crypto/startSenderSession';
 
 const TOKEN_KEY = 'signal-im-token';
 const USER_KEY = 'signal-im-user';
@@ -341,23 +343,38 @@ export default function App() {
       }
       if (msg.type === 'chat') {
         const peerId = peerIdForMessage(msg, session.userId);
-        const storedSession = getSession(session.userId, peerId);
-        protocolLog('chat received', {
-          from: shortId(msg.fromUserId),
-          format: msg.envelope ? 'envelope' : 'legacy-text',
-          session: storedSession?.isInitialized ? 'initialized' : 'missing',
-        });
-        setThreads((prev) => {
-          const list = prev[peerId] ?? [];
-          if (list.some((m) => m.id === msg.id)) return prev;
-          return { ...prev, [peerId]: [...list, msg] };
-        });
-        if (msg.fromUserId !== session.userId) {
-          setPeerList((prev) => {
-            if (prev.some((p) => p.id === msg.fromUserId)) return prev;
-            return [...prev, { id: msg.fromUserId, username: msg.fromUsername }];
+        void (async () => {
+          let storedSession = getSession(session.userId, peerId);
+          if (msg.envelope?.kind === 'initial' && !storedSession && msg.fromUserId !== session.userId) {
+            try {
+              const result = await handleInitialEnvelope(session.userId, msg.fromUserId, msg.envelope);
+              storedSession = getSession(session.userId, peerId);
+              protocolLog('[X3DH] Receiver session ready for message', {
+                from: shortId(msg.fromUserId),
+                sharedSecretPrefix: result.sharedSecretPrefix,
+              });
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : 'receiver session init failed';
+              protocolWarn('receiver X3DH failed', { reason, from: shortId(msg.fromUserId) });
+            }
+          }
+          protocolLog('chat received', {
+            from: shortId(msg.fromUserId),
+            format: msg.envelope ? 'envelope' : 'legacy-text',
+            session: storedSession?.isInitialized ? 'initialized' : 'missing',
           });
-        }
+          setThreads((prev) => {
+            const list = prev[peerId] ?? [];
+            if (list.some((m) => m.id === msg.id)) return prev;
+            return { ...prev, [peerId]: [...list, msg] };
+          });
+          if (msg.fromUserId !== session.userId) {
+            setPeerList((prev) => {
+              if (prev.some((p) => p.id === msg.fromUserId)) return prev;
+              return [...prev, { id: msg.fromUserId, username: msg.fromUsername }];
+            });
+          }
+        })();
         return;
       }
       if (msg.type === 'error') {
@@ -416,7 +433,7 @@ export default function App() {
     setWsError(null);
   };
 
-  const sendChat = () => {
+  const sendChat = async () => {
     const ws = wsRef.current;
     if (!session || !ws || ws.readyState !== WebSocket.OPEN || !recipientId) return;
     const text = draft.trim();
@@ -426,17 +443,26 @@ export default function App() {
       to: shortId(recipientId),
       session: storedSession?.isInitialized ? 'initialized' : 'missing',
     });
-    if (!storedSession) {
-      protocolWarn('no crypto session yet; using dev envelope placeholder', {
-        to: shortId(recipientId),
-      });
+    try {
+      const envelope = storedSession
+        ? (() => {
+            protocolLog('[X3DH] Existing session found, skipping X3DH', { peer: shortId(recipientId) });
+            // TODO: Replace this ratchet placeholder with Double Ratchet message encryption.
+            return createDevEnvelope(text, {
+              kind: 'ratchet',
+              senderIdentityKeyB64: loadSenderIdentityKeyB64(session.userId),
+            });
+          })()
+        : await startSenderSession(session.token, session.userId, recipientId, text);
+      protocolLog('envelope created', { kind: envelope.kind, encrypted: false });
+      ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, envelope }));
+      protocolLog('envelope sent over websocket', { to: shortId(recipientId) });
+      setDraft('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to send message';
+      protocolWarn('send failed', { reason: message });
+      setWsError(message);
     }
-    const senderIdentityKeyB64 = loadSenderIdentityKeyB64(session.userId);
-    const envelope = createDevEnvelope(text, senderIdentityKeyB64);
-    protocolLog('envelope created', { kind: envelope.kind, encrypted: false });
-    ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, envelope }));
-    protocolLog('envelope sent over websocket', { to: shortId(recipientId) });
-    setDraft('');
   };
 
   const sortedPeers = useMemo(
