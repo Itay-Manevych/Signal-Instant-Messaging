@@ -46,12 +46,12 @@ export function migrate(db: Db): void {
 
     CREATE TABLE IF NOT EXISTS one_time_prekeys (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key_id TEXT,
       user_id TEXT NOT NULL,
       public_key_b64 TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
-
     -- Legacy text stays for compatibility; envelope_json is opaque ciphertext transport.
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
@@ -89,6 +89,11 @@ export function migrate(db: Db): void {
 
   addColumnIfMissing(db, 'messages', 'envelope_json TEXT');
   addColumnIfMissing(db, 'pending_messages', 'envelope_json TEXT');
+  addColumnIfMissing(db, 'one_time_prekeys', 'key_id TEXT');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_one_time_prekeys_user_key_id
+      ON one_time_prekeys(user_id, key_id);
+  `);
 }
 
 function addColumnIfMissing(db: Db, table: string, columnSql: string): void {

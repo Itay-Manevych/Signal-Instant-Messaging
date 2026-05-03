@@ -1,6 +1,21 @@
 import type { FastifyInstance } from 'fastify';
-import type { UserStore } from '../store.js';
+import type { OneTimePreKeyPublic, UserStore } from '../store.js';
 import { protocolLog } from '../logging.js';
+
+function normalizeOneTimePreKeys(body: {
+  oneTimePreKeys?: OneTimePreKeyPublic[];
+  oneTimePreKeysB64?: string[];
+}): OneTimePreKeyPublic[] {
+  if (Array.isArray(body.oneTimePreKeys)) {
+    return body.oneTimePreKeys.filter(
+      (key) => typeof key.id === 'string' && typeof key.publicKeyB64 === 'string',
+    );
+  }
+  return (body.oneTimePreKeysB64 ?? []).map((publicKeyB64, index) => ({
+    id: String(index),
+    publicKeyB64,
+  }));
+}
 
 export async function registerKeyRoutes(app: FastifyInstance, store: UserStore): Promise<void> {
   // Publish full set of public keys
@@ -10,6 +25,7 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
       identityKeyB64?: string;
       signedPreKeyB64?: string;
       signedPreKeySignatureB64?: string;
+      oneTimePreKeys?: OneTimePreKeyPublic[];
       oneTimePreKeysB64?: string[];
     } | undefined;
 
@@ -30,14 +46,15 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
     });
 
     // 3. One-Time Pre-Keys (optional/incremental)
-    if (body.oneTimePreKeysB64 && body.oneTimePreKeysB64.length > 0) {
-      store.addOneTimePreKeys(me.sub, body.oneTimePreKeysB64);
+    const oneTimePreKeys = normalizeOneTimePreKeys(body);
+    if (oneTimePreKeys.length > 0) {
+      store.addOneTimePreKeys(me.sub, oneTimePreKeys);
     }
 
     protocolLog('public pre-key bundle published', {
       user: me.username,
       id: me.sub.slice(0, 8),
-      opks: body.oneTimePreKeysB64?.length ?? 0,
+      opks: oneTimePreKeys.length,
     });
     return { ok: true };
   });
@@ -68,8 +85,21 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
         requester: (request.user as { sub: string }).sub.slice(0, 8),
         target: userId.slice(0, 8),
         hasOpk: Boolean(bundle.oneTimePreKey),
+        opkId: bundle.oneTimePreKey?.id,
       });
-      return { userId, bundle };
+      return {
+        userId,
+        bundle: {
+          identityKey: bundle.identityKey,
+          signedPreKey: bundle.signedPreKey,
+          ...(bundle.oneTimePreKey
+            ? {
+                oneTimePreKeyId: bundle.oneTimePreKey.id,
+                oneTimePreKeyPublicKey: bundle.oneTimePreKey.publicKeyB64,
+              }
+            : {}),
+        },
+      };
     },
   );
 }

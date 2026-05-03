@@ -5,6 +5,7 @@ import type { WsServerMessage } from './protocol';
 import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64 } from './crypto/signalKeys';
 import { sign } from './crypto/signalCrypto';
 import { createDevEnvelope, devBase64ToUtf8, loadSenderIdentityKeyB64 } from './crypto/envelope';
+import { normalizeLocalOneTimePreKeyIds } from './crypto/localOneTimePreKeys';
 import { getSession, listSessions } from './crypto/sessionManager';
 import { protocolLog, protocolWarn, shortId } from './crypto/protocolLog';
 
@@ -42,6 +43,12 @@ function messageText(msg: ChatMessage): string {
   } catch {
     return '[encrypted message]';
   }
+}
+
+function newOneTimePreKeyId(index: number): string {
+  return typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `opk-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
 }
 
 function loadSession(): Session | null {
@@ -187,6 +194,22 @@ export default function App() {
 
     if (stored) {
       protocolLog('local identity/prekeys loaded', { user: session.username });
+      const migratedOpks = normalizeLocalOneTimePreKeyIds(session.userId);
+      if (migratedOpks?.changed) {
+        const parsed = JSON.parse(stored) as {
+          identityKey?: { publicKeyB64?: string };
+          signedPreKey?: { publicKeyB64?: string; signatureB64?: string };
+        };
+        if (parsed.identityKey?.publicKeyB64 && parsed.signedPreKey?.publicKeyB64 && parsed.signedPreKey.signatureB64) {
+          void publishKeys(session.token, {
+            identityKeyB64: parsed.identityKey.publicKeyB64,
+            signedPreKeyB64: parsed.signedPreKey.publicKeyB64,
+            signedPreKeySignatureB64: parsed.signedPreKey.signatureB64,
+            oneTimePreKeys: migratedOpks.publicKeys,
+          });
+          protocolLog('legacy OPK ids migrated and republished', { opks: migratedOpks.publicKeys.length });
+        }
+      }
       return;
     }
 
@@ -203,10 +226,10 @@ export default function App() {
         const spk = generateSignedPreKeyPair();
         const sig = sign(ik.privateKey, spk.publicKey);
 
-        const opks: { id: number; publicKey: Uint8Array; privateKey: Uint8Array }[] = [];
+        const opks: { id: string; publicKey: Uint8Array; privateKey: Uint8Array }[] = [];
         for (let i = 0; i < 50; i++) {
           const pair = generateOneTimePreKeyPair();
-          opks.push({ id: i, ...pair });
+          opks.push({ id: newOneTimePreKeyId(i), ...pair });
         }
 
         const fullState = {
@@ -234,7 +257,10 @@ export default function App() {
           identityKeyB64: fullState.identityKey.publicKeyB64,
           signedPreKeyB64: fullState.signedPreKey.publicKeyB64,
           signedPreKeySignatureB64: fullState.signedPreKey.signatureB64,
-          oneTimePreKeysB64: fullState.oneTimePreKeys.map((o) => o.publicKeyB64),
+          oneTimePreKeys: fullState.oneTimePreKeys.map(({ id, publicKeyB64 }) => ({
+            id,
+            publicKeyB64,
+          })),
         });
 
         // 3. Save private + public keys to localStorage ONLY after success

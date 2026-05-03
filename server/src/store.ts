@@ -20,13 +20,15 @@ export type SignedPreKeyPublic = {
   signatureB64: string;
 };
 
+export type OneTimePreKeyPublic = {
+  id: string;
+  publicKeyB64: string;
+};
+
 export type PreKeyBundle = {
   identityKey: IdentityKeyPublic;
   signedPreKey: SignedPreKeyPublic;
-  oneTimePreKey?: {
-    id: number;
-    publicKeyB64: string;
-  };
+  oneTimePreKey?: OneTimePreKeyPublic;
 };
 
 type UserRecord = {
@@ -206,20 +208,20 @@ export class UserStore {
       });
   }
 
-  addOneTimePreKeys(userId: string, publicKeysB64: string[]): void {
+  addOneTimePreKeys(userId: string, keys: OneTimePreKeyPublic[]): void {
     const insert = this.db.prepare(`
-      INSERT INTO one_time_prekeys (user_id, public_key_b64, created_at)
-      VALUES (?, ?, ?)
+      INSERT INTO one_time_prekeys (key_id, user_id, public_key_b64, created_at)
+      VALUES (?, ?, ?, ?)
     `);
 
     const createdAt = new Date().toISOString();
-    const transaction = this.db.transaction((keys: string[]) => {
-      for (const key of keys) {
-        insert.run(userId, key, createdAt);
+    const transaction = this.db.transaction((items: OneTimePreKeyPublic[]) => {
+      for (const key of items) {
+        insert.run(key.id, userId, key.publicKeyB64, createdAt);
       }
     });
 
-    transaction(publicKeysB64);
+    transaction(keys);
   }
 
   getPreKeyBundle(userId: string): PreKeyBundle | null {
@@ -244,13 +246,14 @@ export class UserStore {
       .prepare(
         `
         SELECT id, public_key_b64 AS publicKeyB64
+        , COALESCE(key_id, CAST(id AS TEXT)) AS keyId
         FROM one_time_prekeys
         WHERE user_id = ?
-        ORDER BY RANDOM()
+        ORDER BY key_id IS NULL, RANDOM()
         LIMIT 1
       `,
       )
-      .get(userId) as { id: number; publicKeyB64: string } | undefined;
+      .get(userId) as { id: number; keyId: string; publicKeyB64: string } | undefined;
 
     // If we found one, delete it so it's truly "one-time"
     if (otpk) {
@@ -260,7 +263,7 @@ export class UserStore {
     return {
       identityKey,
       signedPreKey,
-      oneTimePreKey: otpk,
+      oneTimePreKey: otpk ? { id: otpk.keyId, publicKeyB64: otpk.publicKeyB64 } : undefined,
     };
   }
 
