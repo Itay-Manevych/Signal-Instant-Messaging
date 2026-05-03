@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { UserStore } from '../store.js';
+import { protocolLog } from '../logging.js';
 
 export async function registerKeyRoutes(app: FastifyInstance, store: UserStore): Promise<void> {
   // Publish full set of public keys
@@ -33,6 +34,11 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
       store.addOneTimePreKeys(me.sub, body.oneTimePreKeysB64);
     }
 
+    protocolLog('public pre-key bundle published', {
+      user: me.username,
+      id: me.sub.slice(0, 8),
+      opks: body.oneTimePreKeysB64?.length ?? 0,
+    });
     return { ok: true };
   });
 
@@ -58,6 +64,11 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
       const bundle = store.getPreKeyBundle(userId);
       if (!bundle) return reply.code(404).send({ error: 'Pre-key bundle not found for this user' });
 
+      protocolLog('pre-key bundle fetched', {
+        requester: (request.user as { sub: string }).sub.slice(0, 8),
+        target: userId.slice(0, 8),
+        hasOpk: Boolean(bundle.oneTimePreKey),
+      });
       return { userId, bundle };
     },
   );

@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
 import type { ConnectionHub, PendingChatMessage, UserStore } from '../store.js';
-import type { WsClientMessage, WsServerMessage } from '../protocol.js';
+import { isChatEnvelope, type WsClientMessage, type WsServerMessage } from '../protocol.js';
+import { chatLogFields, protocolLog } from '../logging.js';
 
 function parseQueryToken(url: string | undefined): string | null {
   if (!url) return null;
@@ -58,6 +59,7 @@ export function registerWsRoutes(
       send: (data) => socket.send(data),
       close: (code, reason) => socket.close(code, reason),
     });
+    protocolLog('ws connected', { user: username, id: userId.slice(0, 8) });
 
     const connected: WsServerMessage = {
       type: 'connected',
@@ -70,6 +72,7 @@ export function registerWsRoutes(
     // Flush queued messages for this user (offline delivery).
     const pending = store.listPendingMessagesForUser(userId);
     if (pending.length > 0) {
+      protocolLog('offline messages flushed', { user: username, count: pending.length });
       for (const msg of pending) {
         const out: WsServerMessage = { type: 'chat', ...msg };
         socket.send(JSON.stringify(out));
@@ -102,16 +105,18 @@ export function registerWsRoutes(
 
       if (msg.type === 'chat') {
         const toUserId = typeof msg.toUserId === 'string' ? msg.toUserId : '';
-        const text = typeof msg.text === 'string' ? msg.text : '';
-        if (!toUserId || !text.trim()) {
+        const text = 'text' in msg && typeof msg.text === 'string' ? msg.text : '';
+        const envelope = 'envelope' in msg && isChatEnvelope(msg.envelope) ? msg.envelope : undefined;
+        if (!toUserId || (!text.trim() && !envelope)) {
           const err: WsServerMessage = {
             type: 'error',
-            message: 'chat requires non-empty toUserId and text',
+            message: 'chat requires toUserId and text or envelope',
           };
           socket.send(JSON.stringify(err));
           return;
         }
-        if (text.length > 16_384) {
+        const envelopeSize = envelope ? JSON.stringify(envelope).length : 0;
+        if (text.length > 16_384 || envelopeSize > 32_768) {
           const err: WsServerMessage = {
             type: 'error',
             message: 'Message too long',
@@ -142,20 +147,24 @@ export function registerWsRoutes(
           fromUserId: userId,
           fromUsername: user.username,
           toUserId,
-          text,
+          ...(text.trim() ? { text } : {}),
+          ...(envelope ? { envelope } : {}),
           sentAt: new Date().toISOString(),
         };
 
         // Persist message history regardless of recipient online state.
         store.saveMessage(out);
+        protocolLog('chat stored', chatLogFields(out));
 
         // Always echo to sender.
         hub.sendTo(userId, { type: 'chat', ...out } satisfies WsServerMessage);
 
         // If recipient is online, deliver immediately; otherwise enqueue for later.
         const delivered = hub.sendTo(toUserId, { type: 'chat', ...out } satisfies WsServerMessage);
+        protocolLog('chat routed', { ...chatLogFields(out), delivered });
         if (!delivered) {
           store.enqueuePendingMessage(out);
+          protocolLog('chat queued offline', chatLogFields(out));
         }
         return;
       }
@@ -166,6 +175,7 @@ export function registerWsRoutes(
 
     socket.on('close', () => {
       hub.remove(userId);
+      protocolLog('ws disconnected', { user: username, id: userId.slice(0, 8) });
       broadcastPresence(hub, store);
     });
   });

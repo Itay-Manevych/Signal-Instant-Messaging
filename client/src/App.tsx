@@ -4,6 +4,7 @@ import { fetchConversation, fetchUsers, login, publishKeys, register } from './a
 import type { WsServerMessage } from './protocol';
 import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64 } from './crypto/signalKeys';
 import { sign } from './crypto/signalCrypto';
+import { createDevEnvelope, devBase64ToUtf8, loadSenderIdentityKeyB64 } from './crypto/envelope';
 
 const TOKEN_KEY = 'signal-im-token';
 const USER_KEY = 'signal-im-user';
@@ -29,6 +30,16 @@ function formatDayLabel(iso: string): string {
     month: 'short',
     day: 'numeric',
   });
+}
+
+function messageText(msg: ChatMessage): string {
+  if (!msg.envelope) return msg.text ?? '';
+  try {
+    // TODO: Replace this dev decode with Double Ratchet AEAD decryption.
+    return devBase64ToUtf8(msg.envelope.ciphertextB64);
+  } catch {
+    return '[encrypted message]';
+  }
 }
 
 function loadSession(): Session | null {
@@ -363,10 +374,12 @@ export default function App() {
 
   const sendChat = () => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN || !recipientId) return;
+    if (!session || !ws || ws.readyState !== WebSocket.OPEN || !recipientId) return;
     const text = draft.trim();
     if (!text) return;
-    ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, text }));
+    const senderIdentityKeyB64 = loadSenderIdentityKeyB64(session.userId);
+    const envelope = createDevEnvelope(text, senderIdentityKeyB64);
+    ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, envelope }));
     setDraft('');
   };
 
@@ -609,7 +622,7 @@ export default function App() {
                           {mine ? 'You' : m.fromUsername} ·{' '}
                           {new Date(m.sentAt).toLocaleTimeString()}
                         </div>
-                        <div className="text">{m.text}</div>
+                        <div className="text">{messageText(m)}</div>
                       </div>
                     </div>
                   );

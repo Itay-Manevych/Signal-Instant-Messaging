@@ -1,3 +1,5 @@
+import type { ChatEnvelope } from './protocol';
+
 const headers = (token: string) => ({
   'Content-Type': 'application/json',
   Authorization: `Bearer ${token}`,
@@ -99,7 +101,8 @@ export async function fetchConversation(token: string, peerId: string) {
     fromUserId: string;
     fromUsername: string;
     toUserId: string;
-    text: string;
+    text?: string;
+    envelope?: ChatEnvelope;
     sentAt: string;
   }[];
 }
