@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.app.json --noEmit",
     "test:x3dh": "tsx src/crypto/test-handshake.ts",
-    "test-handshake": "tsx src/crypto/test-handshake.ts"
+    "test:dr": "tsx src/crypto/test-double-ratchet.ts"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",
