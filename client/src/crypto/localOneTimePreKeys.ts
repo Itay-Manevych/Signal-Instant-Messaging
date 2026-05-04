@@ -49,7 +49,6 @@ export function consumeOneTimePreKeyPrivate(userId: string, keyId: string, devic
   const key = findOneTimePreKeyPrivate(userId, keyId, deviceId);
   if (!key) return null;
   removeOneTimePreKeyPrivate(userId, keyId, deviceId);
-  // TODO: Use this private OPK during receiver-side X3DH, then discard it.
   return key;
 }
 
