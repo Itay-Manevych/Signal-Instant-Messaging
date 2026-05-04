@@ -1,27 +1,8 @@
-/** E2EE Messages over WebSocket. */
-
-export interface RatchetHeaderB64 {
-  dhPublicKeyB64: string;
-  pn: number; // previous chain length
-  n: number;  // message index
-  ivB64: string; // AES-GCM IV
-  /** Optional X3DH handshake data (only sent in the very first message) */
-  x3dh?: {
-    identityKeyB64: string;
-    ephemeralKeyB64: string;
-    oneTimePreKeyId?: number;
-  };
-}
+/** Plain JSON messages over WebSocket (not end-to-end encrypted yet). */
 
 export type WsClientMessage =
   | { type: 'ping' }
-  | { 
-      type: 'chat'; 
-      toUserId: string; 
-      text?: string; // legacy plaintext
-      ciphertext?: string; 
-      header?: RatchetHeaderB64;
-    };
+  | { type: 'chat'; toUserId: string; text: string };
 
 export type WsServerMessage =
   | { type: 'connected'; userId: string; username: string }
@@ -33,9 +14,7 @@ export type WsServerMessage =
       fromUserId: string;
       fromUsername: string;
       toUserId: string;
-      text?: string; // legacy plaintext
-      ciphertext?: string;
-      header?: RatchetHeaderB64;
+      text: string;
       sentAt: string;
     }
   | { type: 'error'; message: string };

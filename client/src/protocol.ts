@@ -15,18 +15,6 @@ export type WsServerMessage =
       fromUsername: string;
       toUserId: string;
       text: string;
-      ciphertext?: string;
-      header?: {
-        dhPublicKeyB64: string;
-        pn: number;
-        n: number;
-        ivB64: string;
-        x3dh?: {
-          identityKeyB64: string;
-          ephemeralKeyB64: string;
-          oneTimePreKeyId?: string;
-        };
-      };
       sentAt: string;
     }
   | { type: 'error'; message: string };
