@@ -1,27 +1,37 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
-import { fetchConversation, fetchUsers, login, publishKeys, register } from './api';
+import { fetchConversation, fetchRegisteredDevices, fetchUsers, login, publishKeys, register } from './api';
+import type { RegisteredDevice } from './api/keys';
 import type { WsServerMessage } from './protocol';
 import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64 } from './crypto/signalKeys';
 import { sign } from './crypto/signalCrypto';
-import { devBase64ToUtf8, loadSenderIdentityKeyB64 } from './crypto/envelope';
-import { cacheMessagePlaintext, decryptRatchetEnvelope, encryptRatchetEnvelope, readCachedMessagePlaintext, resolveOutgoingPlaintext } from './crypto/encryptedChat';
+import { cacheMessagePlaintext, readCachedMessagePlaintext, resolveOutgoingPlaintext } from './crypto/encryptedChat';
 import { normalizeLocalOneTimePreKeyIds } from './crypto/localOneTimePreKeys';
-import { getSession, listSessions, updateRatchetState } from './crypto/sessionManager';
+import { listSessions } from './crypto/sessionManager';
 import { protocolLog, protocolWarn, shortId } from './crypto/protocolLog';
-import { handleInitialEnvelope } from './crypto/handleInitialEnvelope';
-import type { RatchetState } from './crypto/ratchetTypes';
-import { startSenderSession } from './crypto/startSenderSession';
+import { loadOrCreateDevice } from './crypto/deviceIdentity';
+import { encryptForPeerDevices } from './crypto/sesameSend';
+import { decryptSesameEnvelope } from './crypto/sesameReceive';
+import { collapseFanoutMessages } from './collapseFanoutMessages';
 
 const TOKEN_KEY = 'signal-im-token';
 const USER_KEY = 'signal-im-user';
 const THEME_KEY = 'signal-im-theme';
 
-type Session = { token: string; userId: string; username: string };
+type Session = {
+  token: string;
+  userId: string;
+  username: string;
+  deviceId: string;
+  deviceSecret: string;
+  deviceName: string;
+  linkedAt: string;
+};
 
 type ChatMessage = Extract<WsServerMessage, { type: 'chat' }>;
 
 function peerIdForMessage(msg: ChatMessage, selfId: string): string {
+  if (msg.syncPeerUserId) return msg.syncPeerUserId;
   return msg.fromUserId === selfId ? msg.toUserId : msg.fromUserId;
 }
 
@@ -42,12 +52,7 @@ function formatDayLabel(iso: string): string {
 function messageText(msg: ChatMessage): string {
   if (msg.text) return msg.text;
   if (!msg.envelope) return '';
-  try {
-    // TODO: Replace this dev decode with Double Ratchet AEAD decryption.
-    return devBase64ToUtf8(msg.envelope.ciphertextB64);
-  } catch {
-    return '[encrypted message]';
-  }
+  return '[encrypted message unavailable on this device]';
 }
 
 function newOneTimePreKeyId(index: number): string {
@@ -63,7 +68,16 @@ function loadSession(): Session | null {
     if (!raw || !token) return null;
     const u = JSON.parse(raw) as { userId: string; username: string };
     if (!u.userId || !u.username) return null;
-    return { token, userId: u.userId, username: u.username };
+    const device = loadOrCreateDevice(u.userId);
+    return {
+      token,
+      userId: u.userId,
+      username: u.username,
+      deviceId: device.deviceId,
+      deviceSecret: device.deviceSecret,
+      deviceName: device.name,
+      linkedAt: device.linkedAt,
+    };
   } catch {
     return null;
   }
@@ -124,10 +138,8 @@ function MoonIcon() {
 }
 
 export default function App() {
-  // Don't auto-sign-in on refresh; offer "resume" explicitly to avoid confusion
-  // when a stale token exists in sessionStorage.
   const [savedSession, setSavedSession] = useState<Session | null>(() => loadSession());
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<Session | null>(() => loadSession());
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -142,6 +154,7 @@ export default function App() {
   /** One message list per peer (other user's id). */
   const [threads, setThreads] = useState<Record<string, ChatMessage[]>>({});
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
+  const [registeredDevices, setRegisteredDevices] = useState<RegisteredDevice[]>([]);
   const [wsState, setWsState] = useState<'idle' | 'connecting' | 'open' | 'closed'>('idle');
   const [wsError, setWsError] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => {
@@ -171,10 +184,32 @@ export default function App() {
     setPeerList(users);
   }, []);
 
+  const loadDevices = useCallback(async (tok: string) => {
+    setRegisteredDevices(await fetchRegisteredDevices(tok));
+  }, []);
+
+  const enterSession = useCallback((res: { token: string; userId: string; username: string }) => {
+    const device = loadOrCreateDevice(res.userId);
+    const s: Session = {
+      token: res.token,
+      userId: res.userId,
+      username: res.username,
+      deviceId: device.deviceId,
+      deviceSecret: device.deviceSecret,
+      deviceName: device.name,
+      linkedAt: device.linkedAt,
+    };
+    saveSession(s);
+    setSession(s);
+    setSavedSession(s);
+    setThreads({});
+    setRecipientId('');
+  }, []);
+
   useEffect(() => {
     if (!session) return;
     let cancelled = false;
-    loadPeers(session.token).catch((e: unknown) => {
+    Promise.all([loadPeers(session.token), loadDevices(session.token)]).catch((e: unknown) => {
       if (!cancelled) {
         const msg = e instanceof Error ? e.message : 'Failed to load users';
         setFormError(msg);
@@ -189,17 +224,17 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [session, loadPeers]);
+  }, [session, loadPeers, loadDevices]);
 
   useEffect(() => {
     if (!session) return;
 
-    const KEY_STORAGE_PREFIX = `signal-keys-${session.userId}`;
+    const KEY_STORAGE_PREFIX = `signal-keys-${session.userId}-${session.deviceId}`;
     const stored = localStorage.getItem(KEY_STORAGE_PREFIX);
 
     if (stored) {
       protocolLog('local identity/prekeys loaded', { user: session.username });
-      const migratedOpks = normalizeLocalOneTimePreKeyIds(session.userId);
+      const migratedOpks = normalizeLocalOneTimePreKeyIds(session.userId, session.deviceId);
       if (migratedOpks?.changed) {
         const parsed = JSON.parse(stored) as {
           identityKey?: { publicKeyB64?: string };
@@ -207,6 +242,9 @@ export default function App() {
         };
         if (parsed.identityKey?.publicKeyB64 && parsed.signedPreKey?.publicKeyB64 && parsed.signedPreKey.signatureB64) {
           void publishKeys(session.token, {
+            deviceId: session.deviceId,
+            deviceSecret: session.deviceSecret,
+            deviceName: session.deviceName,
             identityKeyB64: parsed.identityKey.publicKeyB64,
             signedPreKeyB64: parsed.signedPreKey.publicKeyB64,
             signedPreKeySignatureB64: parsed.signedPreKey.signatureB64,
@@ -259,6 +297,9 @@ export default function App() {
         // allowing the effect to retry on the next session trigger.
         protocolLog('publishing public pre-key bundle', { opks: fullState.oneTimePreKeys.length });
         await publishKeys(session.token, {
+          deviceId: session.deviceId,
+          deviceSecret: session.deviceSecret,
+          deviceName: session.deviceName,
           identityKeyB64: fullState.identityKey.publicKeyB64,
           signedPreKeyB64: fullState.signedPreKey.publicKeyB64,
           signedPreKeySignatureB64: fullState.signedPreKey.signatureB64,
@@ -294,7 +335,7 @@ export default function App() {
     }
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/api/ws?token=${encodeURIComponent(session.token)}`;
+    const url = `${proto}//${window.location.host}/api/ws?token=${encodeURIComponent(session.token)}&deviceId=${encodeURIComponent(session.deviceId)}&deviceSecret=${encodeURIComponent(session.deviceSecret)}`;
 
     setWsState('connecting');
     setWsError(null);
@@ -307,9 +348,11 @@ export default function App() {
       setWsError(null);
       protocolLog('websocket open', {
         user: session.username,
+        device: session.deviceId.slice(0, 8),
         sessions: listSessions(session.userId).length,
       });
       void loadPeers(session.token);
+      void loadDevices(session.token);
     };
 
     ws.onclose = (ev) => {
@@ -342,47 +385,54 @@ export default function App() {
       if (msg.type === 'presence') {
         setOnlineIds(new Set(msg.online.map((x) => x.userId)));
         void loadPeers(session.token);
+        void loadDevices(session.token);
         return;
       }
       if (msg.type === 'chat') {
         const peerId = peerIdForMessage(msg, session.userId);
         void (async () => {
-          let storedSession = getSession(session.userId, peerId);
           let plaintext = msg.text ?? null;
-          if (msg.envelope?.kind === 'initial' && !storedSession && msg.fromUserId !== session.userId) {
+          const isOwnDeviceSync = Boolean(msg.syncPeerUserId) && msg.fromUserId === session.userId;
+          if (msg.envelope && (msg.fromUserId !== session.userId || isOwnDeviceSync)) {
             try {
-              const result = await handleInitialEnvelope(session.userId, msg.fromUserId, msg.envelope);
-              storedSession = getSession(session.userId, peerId);
-              plaintext = result.plaintext;
-              protocolLog('[X3DH] Receiver session ready for message', {
+              plaintext = await decryptSesameEnvelope(
+                { userId: session.userId, deviceId: session.deviceId },
+                { userId: msg.fromUserId, deviceId: msg.fromDeviceId ?? 'default' },
+                msg.envelope,
+              );
+              protocolLog('[Sesame] message decrypted', {
                 from: shortId(msg.fromUserId),
-                sharedSecretPrefix: result.sharedSecretPrefix,
+                device: msg.fromDeviceId?.slice(0, 8) ?? 'default',
               });
             } catch (error) {
-              const reason = error instanceof Error ? error.message : 'receiver session init failed';
-              protocolWarn('receiver X3DH failed', { reason, from: shortId(msg.fromUserId) });
+              const reason = error instanceof Error ? error.message : 'receiver Sesame decrypt failed';
+              protocolWarn('receiver Sesame failed', { reason, from: shortId(msg.fromUserId) });
             }
-          }
-          if (msg.envelope?.kind === 'ratchet' && storedSession?.ratchetState && msg.fromUserId !== session.userId) {
-            const result = await decryptRatchetEnvelope(storedSession.ratchetState as RatchetState, msg.envelope, msg.fromUserId, session.userId);
-            updateRatchetState(session.userId, peerId, result.state);
-            storedSession = getSession(session.userId, peerId);
-            plaintext = result.plaintext;
           }
           if (msg.envelope && msg.fromUserId === session.userId) {
             plaintext = resolveOutgoingPlaintext(session.userId, msg.envelope) ?? plaintext;
           }
           if (!plaintext) plaintext = readCachedMessagePlaintext(session.userId, msg.id);
-          if (plaintext) cacheMessagePlaintext(session.userId, msg.id, plaintext);
+          if (plaintext) {
+            cacheMessagePlaintext(session.userId, msg.id, plaintext);
+          }
+          if (!plaintext && msg.envelope) {
+            protocolWarn('received encrypted row unavailable on this device', {
+              from: shortId(msg.fromUserId),
+              id: msg.id.slice(0, 8),
+            });
+          }
           protocolLog('chat received', {
             from: shortId(msg.fromUserId),
             format: msg.envelope ? 'envelope' : 'legacy-text',
-            session: storedSession?.isInitialized ? 'initialized' : 'missing',
+            session: msg.sesameSessionId ? 'sesame' : 'legacy',
           });
           setThreads((prev) => {
             const list = prev[peerId] ?? [];
             if (list.some((m) => m.id === msg.id)) return prev;
-            return { ...prev, [peerId]: [...list, plaintext ? { ...msg, text: plaintext } : msg] };
+            const row = plaintext ? { ...msg, text: plaintext } : msg;
+            const merged = collapseFanoutMessages([...list, row]);
+            return { ...prev, [peerId]: merged };
           });
           if (msg.fromUserId !== session.userId) {
             setPeerList((prev) => {
@@ -402,7 +452,7 @@ export default function App() {
       ws.close();
       if (wsRef.current === ws) wsRef.current = null;
     };
-  }, [session, loadPeers]);
+  }, [session, loadPeers, loadDevices]);
 
   const submitAuth = async () => {
     setFormError(null);
@@ -414,23 +464,15 @@ export default function App() {
           setFormError('Passwords do not match');
           return;
         }
-        await register(username, password);
+        const res = await register(username, password);
+        enterSession(res);
         setMode('login');
         setPassword('');
         setPassword2('');
-        setAuthSuccess('Account created. Sign in with your username and password.');
+        setAuthSuccess('Account created and signed in.');
       } else {
         const res = await login(username, password);
-        const s: Session = {
-          token: res.token,
-          userId: res.userId,
-          username: res.username,
-        };
-        saveSession(s);
-        setSession(s);
-        setSavedSession(s);
-        setThreads({});
-        setRecipientId('');
+        enterSession(res);
       }
     } catch (e: unknown) {
       setFormError(e instanceof Error ? e.message : 'Failed');
@@ -445,6 +487,7 @@ export default function App() {
     setSavedSession(null);
     setThreads({});
     setPeerList([]);
+    setRegisteredDevices([]);
     setRecipientId('');
     setWsError(null);
   };
@@ -454,37 +497,40 @@ export default function App() {
     if (!session || !ws || ws.readyState !== WebSocket.OPEN || !recipientId) return;
     const text = draft.trim();
     if (!text) return;
-    const storedSession = getSession(session.userId, recipientId);
     protocolLog('send requested', {
       to: shortId(recipientId),
-      session: storedSession?.isInitialized ? 'initialized' : 'missing',
+      device: session.deviceId.slice(0, 8),
     });
     try {
-      const envelope = storedSession
-        ? (() => {
-            protocolLog('[X3DH] Existing session found, skipping X3DH', { peer: shortId(recipientId) });
-            if (!storedSession.ratchetState) throw new Error('Missing ratchet state');
-            return null;
-          })()
-        : await startSenderSession(session.token, session.userId, recipientId, text);
-      const finalEnvelope = envelope ?? (
-        await (async () => {
-          const senderIdentityKeyB64 = loadSenderIdentityKeyB64(session.userId);
-          const result = await encryptRatchetEnvelope(
-            session.userId,
-            storedSession!.ratchetState as RatchetState,
-            text,
-            senderIdentityKeyB64,
-            session.userId,
-            recipientId,
-          );
-          updateRatchetState(session.userId, recipientId, result.state);
-          return result.envelope;
-        })()
+      const clientMessageId = typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const packets = await encryptForPeerDevices(
+        session.token,
+        { userId: session.userId, deviceId: session.deviceId },
+        recipientId,
+        text,
       );
-      protocolLog('envelope created', { kind: finalEnvelope.kind, encrypted: true });
-      ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, envelope: finalEnvelope }));
-      protocolLog('envelope sent over websocket', { to: shortId(recipientId) });
+      const syncPackets = await encryptForPeerDevices(
+        session.token,
+        { userId: session.userId, deviceId: session.deviceId },
+        session.userId,
+        text,
+      );
+      for (const [index, packet] of packets.entries()) {
+        protocolLog('envelope created', { kind: packet.envelope.kind, encrypted: true, device: packet.toDeviceId });
+        ws.send(JSON.stringify({ type: 'chat', clientMessageId, senderEcho: index === 0, ...packet }));
+      }
+      for (const packet of syncPackets) {
+        ws.send(JSON.stringify({
+          type: 'chat',
+          clientMessageId,
+          syncPeerUserId: recipientId,
+          senderEcho: false,
+          ...packet,
+        }));
+      }
+      protocolLog('envelopes sent over websocket', { to: shortId(recipientId), devices: packets.length, sync: syncPackets.length });
       setDraft('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send message';
@@ -517,23 +563,56 @@ export default function App() {
     setRecipientId(id);
     setDraft('');
     if (!session) return;
-    const storedSession = getSession(session.userId, id);
     protocolLog('conversation selected', {
       peer: shortId(id),
-      session: storedSession?.isInitialized ? 'initialized' : 'missing',
+      device: session.deviceId.slice(0, 8),
     });
-    fetchConversation(session.token, id)
-      .then((msgs) => {
+    fetchConversation(session.token, id, session.deviceId, session.deviceSecret)
+      .then(async (msgs) => {
         protocolLog('history received', {
           peer: shortId(id),
           count: msgs.length,
           envelopes: msgs.filter((m) => m.envelope).length,
         });
-        const hydrated = msgs.map((msg) => {
-          const plaintext = readCachedMessagePlaintext(session.userId, msg.id);
-          return plaintext ? { ...msg, text: plaintext } : msg;
-        });
-        setThreads((prev) => ({ ...prev, [id]: hydrated as ChatMessage[] }));
+        const hydrated: ChatMessage[] = [];
+        const seen = new Set<string>();
+        for (const msg of msgs as ChatMessage[]) {
+          if (seen.has(msg.id)) continue;
+          let plaintext = readCachedMessagePlaintext(session.userId, msg.id);
+          const isOwnDeviceSync = Boolean(msg.syncPeerUserId) && msg.fromUserId === session.userId;
+          if (!plaintext && msg.envelope && (msg.fromUserId !== session.userId || isOwnDeviceSync)) {
+            try {
+              plaintext = await decryptSesameEnvelope(
+                { userId: session.userId, deviceId: session.deviceId },
+                { userId: msg.fromUserId, deviceId: msg.fromDeviceId ?? 'default' },
+                msg.envelope,
+              );
+            } catch (error) {
+              protocolWarn('history Sesame decrypt failed', {
+                reason: error instanceof Error ? error.message : 'unknown',
+                peer: shortId(id),
+              });
+            }
+          }
+          if (!plaintext && msg.envelope && msg.fromUserId === session.userId) {
+            plaintext = resolveOutgoingPlaintext(session.userId, msg.envelope);
+          }
+          if (plaintext) {
+            cacheMessagePlaintext(session.userId, msg.id, plaintext);
+          }
+          seen.add(msg.id);
+          if (!plaintext && msg.envelope) {
+            protocolWarn('history row unavailable on this device', {
+              peer: shortId(id),
+              id: msg.id.slice(0, 8),
+            });
+          }
+          hydrated.push(plaintext ? { ...msg, text: plaintext } : msg);
+        }
+        setThreads((prev) => ({
+          ...prev,
+          [id]: collapseFanoutMessages(hydrated as ChatMessage[]),
+        }));
       })
       .catch(() => {
         // If history fails to load, keep UI responsive; WS will still deliver new messages.
@@ -657,6 +736,10 @@ export default function App() {
         <div>
           <h1>Signal Instant Messaging</h1>
           <p className="tagline">Signed in as {session.username}</p>
+          <p className="device-line">
+            Device: {session.deviceName} · {session.deviceId.slice(0, 8)} · linked{' '}
+            {new Date(session.linkedAt).toLocaleString()}
+          </p>
           <p className="status-line">
             WebSocket: <span className={wsState === 'open' ? 'ok' : 'warn'}>{wsState}</span>
           </p>
@@ -706,6 +789,18 @@ export default function App() {
               </li>
             ))}
           </ul>
+          <div className="device-panel">
+            <h3>Your devices</h3>
+            <p className="hint">New devices only decrypt future messages unless history is transferred.</p>
+            <ul>
+              {registeredDevices.map((device) => (
+                <li key={device.deviceId} className={device.deviceId === session.deviceId ? 'current-device' : ''}>
+                  <span>{device.name}</span>
+                  <code>{device.deviceId.slice(0, 8)}</code>
+                </li>
+              ))}
+            </ul>
+          </div>
         </aside>
 
         <section className="card chat-pane">

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "test:hub": "tsx src/test-multidevice-hub.ts",
     "db:reset": "tsx src/reset-db.ts",
     "start": "node dist/index.js"
   },

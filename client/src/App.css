@@ -69,6 +69,12 @@
   font-size: 0.9rem;
 }
 
+.device-line {
+  margin: 0 0 0.35rem;
+  color: var(--muted2);
+  font-size: 0.8rem;
+}
+
 .auth-stack {
   display: flex;
   flex-direction: column;
@@ -311,6 +317,42 @@ button.ghost {
 
 .user-list li {
   margin-bottom: 0.35rem;
+}
+
+.device-panel {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--card-border);
+}
+
+.device-panel h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.9rem;
+}
+
+.device-panel ul {
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.device-panel li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.device-panel code {
+  color: var(--muted2);
+}
+
+.device-panel .current-device span::after {
+  content: ' (current)';
+  color: var(--ok);
 }
 
 .user-pick {
