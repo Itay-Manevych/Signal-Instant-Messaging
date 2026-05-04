@@ -39,9 +39,11 @@ export function loadReceiverHandshakeKeys(userId: string) {
   const keys = loadStoredAccountKeys(userId);
   const identity = keys?.identityKey;
   const signedPreKey = keys?.signedPreKey;
-  if (!identity?.privateKeyB64 || !signedPreKey?.privateKeyB64) return null;
+  if (!identity?.privateKeyB64 || !signedPreKey?.privateKeyB64 || !signedPreKey.publicKeyB64) return null;
   return {
     identityPrivateKey: fromBase64(identity.privateKeyB64),
     signedPreKeyPrivateKey: fromBase64(signedPreKey.privateKeyB64),
+    signedPreKeyPublicKeyB64: signedPreKey.publicKeyB64,
+    signedPreKeyPrivateKeyB64: signedPreKey.privateKeyB64,
   };
 }

@@ -14,4 +14,3 @@ export function signalKdf(dhValues: Uint8Array[]): Uint8Array {
   }
   return hkdfSha256(keyMaterial, undefined, X3DH_HKDF_INFO);
 }
-

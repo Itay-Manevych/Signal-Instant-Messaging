@@ -2,7 +2,9 @@ import type { ChatEnvelope } from '../protocol';
 import { findOneTimePreKeyPrivate, removeOneTimePreKeyPrivate } from './localOneTimePreKeys';
 import { loadReceiverHandshakeKeys } from './localAccountKeys';
 import { protocolLog } from './protocolLog';
-import { createSessionFromX3DH } from './sessionManager';
+import { createSessionFromX3DH, updateRatchetState } from './sessionManager';
+import { decryptRatchetEnvelope } from './encryptedChat';
+import { ratchetInitBob } from './ratchetInit';
 import { fromBase64, toBase64 } from './signalKeys';
 import { initializeReceiverSessionDetailed } from './x3dh';
 
@@ -14,7 +16,7 @@ export async function handleInitialEnvelope(
   selfUserId: string,
   fromUserId: string,
   envelope: ChatEnvelope,
-): Promise<{ sharedSecretPrefix: string }> {
+): Promise<{ plaintext: string; sharedSecretPrefix: string }> {
   const receiverKeys = loadReceiverHandshakeKeys(selfUserId);
   if (!receiverKeys || !envelope.senderEphemeralKeyB64) throw new Error('Missing receiver handshake keys');
   protocolLog('[X3DH] Initial envelope received, no session found', { from: fromUserId.slice(0, 8) });
@@ -43,10 +45,24 @@ export async function handleInitialEnvelope(
   });
   protocolLog('[X3DH] Receiver sharedSecretPrefix', { value: shortSecret(result.sharedSecret) });
   createSessionFromX3DH(selfUserId, fromUserId, envelope.senderIdentityKeyB64, toBase64(result.sharedSecret));
+  const ratchetState = ratchetInitBob(result.sharedSecret, {
+    publicKeyB64: receiverKeys.signedPreKeyPublicKeyB64,
+    privateKeyB64: receiverKeys.signedPreKeyPrivateKeyB64,
+  });
+  protocolLog('[DR] Bob ratchet initialized (DEV ONLY)', {
+    rootKey: ratchetState.rootKeyB64,
+    selfRatchetPublicKey: ratchetState.selfRatchetPublicKeyB64,
+  });
+  const decrypted = await decryptRatchetEnvelope(ratchetState, envelope, fromUserId, selfUserId);
+  updateRatchetState(selfUserId, fromUserId, decrypted.state);
   protocolLog('[X3DH] Receiver session saved', { peer: fromUserId.slice(0, 8) });
   if (envelope.usedOneTimePreKeyId) {
     removeOneTimePreKeyPrivate(selfUserId, envelope.usedOneTimePreKeyId);
     protocolLog('[X3DH] Consumed local one-time prekey', { id: envelope.usedOneTimePreKeyId });
   }
-  return { sharedSecretPrefix: shortSecret(result.sharedSecret) };
+  protocolLog('[DR] Initial envelope decrypted (DEV ONLY)', {
+    header: JSON.stringify(envelope.ratchetHeader ?? null),
+    plaintext: decrypted.plaintext,
+  });
+  return { plaintext: decrypted.plaintext, sharedSecretPrefix: shortSecret(result.sharedSecret) };
 }

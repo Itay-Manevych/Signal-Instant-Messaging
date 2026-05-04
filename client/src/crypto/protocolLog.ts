@@ -21,4 +21,3 @@ export function protocolWarn(event: string, fields: Record<string, LogValue> = {
   const details = fieldsToText(fields);
   console.warn(`[signal-client] WARN ${event}${details ? ` | ${details}` : ''}`);
 }
-

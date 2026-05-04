@@ -33,4 +33,3 @@ export function initializeSenderSession(
     dh4: dhValues[3],
   };
 }
-

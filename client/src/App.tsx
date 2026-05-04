@@ -4,11 +4,13 @@ import { fetchConversation, fetchUsers, login, publishKeys, register } from './a
 import type { WsServerMessage } from './protocol';
 import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64 } from './crypto/signalKeys';
 import { sign } from './crypto/signalCrypto';
-import { createDevEnvelope, devBase64ToUtf8, loadSenderIdentityKeyB64 } from './crypto/envelope';
+import { devBase64ToUtf8, loadSenderIdentityKeyB64 } from './crypto/envelope';
+import { cacheMessagePlaintext, decryptRatchetEnvelope, encryptRatchetEnvelope, readCachedMessagePlaintext, resolveOutgoingPlaintext } from './crypto/encryptedChat';
 import { normalizeLocalOneTimePreKeyIds } from './crypto/localOneTimePreKeys';
-import { getSession, listSessions } from './crypto/sessionManager';
+import { getSession, listSessions, updateRatchetState } from './crypto/sessionManager';
 import { protocolLog, protocolWarn, shortId } from './crypto/protocolLog';
 import { handleInitialEnvelope } from './crypto/handleInitialEnvelope';
+import type { RatchetState } from './crypto/ratchetTypes';
 import { startSenderSession } from './crypto/startSenderSession';
 
 const TOKEN_KEY = 'signal-im-token';
@@ -38,7 +40,8 @@ function formatDayLabel(iso: string): string {
 }
 
 function messageText(msg: ChatMessage): string {
-  if (!msg.envelope) return msg.text ?? '';
+  if (msg.text) return msg.text;
+  if (!msg.envelope) return '';
   try {
     // TODO: Replace this dev decode with Double Ratchet AEAD decryption.
     return devBase64ToUtf8(msg.envelope.ciphertextB64);
@@ -345,10 +348,12 @@ export default function App() {
         const peerId = peerIdForMessage(msg, session.userId);
         void (async () => {
           let storedSession = getSession(session.userId, peerId);
+          let plaintext = msg.text ?? null;
           if (msg.envelope?.kind === 'initial' && !storedSession && msg.fromUserId !== session.userId) {
             try {
               const result = await handleInitialEnvelope(session.userId, msg.fromUserId, msg.envelope);
               storedSession = getSession(session.userId, peerId);
+              plaintext = result.plaintext;
               protocolLog('[X3DH] Receiver session ready for message', {
                 from: shortId(msg.fromUserId),
                 sharedSecretPrefix: result.sharedSecretPrefix,
@@ -358,6 +363,17 @@ export default function App() {
               protocolWarn('receiver X3DH failed', { reason, from: shortId(msg.fromUserId) });
             }
           }
+          if (msg.envelope?.kind === 'ratchet' && storedSession?.ratchetState && msg.fromUserId !== session.userId) {
+            const result = await decryptRatchetEnvelope(storedSession.ratchetState as RatchetState, msg.envelope, msg.fromUserId, session.userId);
+            updateRatchetState(session.userId, peerId, result.state);
+            storedSession = getSession(session.userId, peerId);
+            plaintext = result.plaintext;
+          }
+          if (msg.envelope && msg.fromUserId === session.userId) {
+            plaintext = resolveOutgoingPlaintext(session.userId, msg.envelope) ?? plaintext;
+          }
+          if (!plaintext) plaintext = readCachedMessagePlaintext(session.userId, msg.id);
+          if (plaintext) cacheMessagePlaintext(session.userId, msg.id, plaintext);
           protocolLog('chat received', {
             from: shortId(msg.fromUserId),
             format: msg.envelope ? 'envelope' : 'legacy-text',
@@ -366,7 +382,7 @@ export default function App() {
           setThreads((prev) => {
             const list = prev[peerId] ?? [];
             if (list.some((m) => m.id === msg.id)) return prev;
-            return { ...prev, [peerId]: [...list, msg] };
+            return { ...prev, [peerId]: [...list, plaintext ? { ...msg, text: plaintext } : msg] };
           });
           if (msg.fromUserId !== session.userId) {
             setPeerList((prev) => {
@@ -447,15 +463,27 @@ export default function App() {
       const envelope = storedSession
         ? (() => {
             protocolLog('[X3DH] Existing session found, skipping X3DH', { peer: shortId(recipientId) });
-            // TODO: Replace this ratchet placeholder with Double Ratchet message encryption.
-            return createDevEnvelope(text, {
-              kind: 'ratchet',
-              senderIdentityKeyB64: loadSenderIdentityKeyB64(session.userId),
-            });
+            if (!storedSession.ratchetState) throw new Error('Missing ratchet state');
+            return null;
           })()
         : await startSenderSession(session.token, session.userId, recipientId, text);
-      protocolLog('envelope created', { kind: envelope.kind, encrypted: false });
-      ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, envelope }));
+      const finalEnvelope = envelope ?? (
+        await (async () => {
+          const senderIdentityKeyB64 = loadSenderIdentityKeyB64(session.userId);
+          const result = await encryptRatchetEnvelope(
+            session.userId,
+            storedSession!.ratchetState as RatchetState,
+            text,
+            senderIdentityKeyB64,
+            session.userId,
+            recipientId,
+          );
+          updateRatchetState(session.userId, recipientId, result.state);
+          return result.envelope;
+        })()
+      );
+      protocolLog('envelope created', { kind: finalEnvelope.kind, encrypted: true });
+      ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, envelope: finalEnvelope }));
       protocolLog('envelope sent over websocket', { to: shortId(recipientId) });
       setDraft('');
     } catch (error) {
@@ -501,7 +529,11 @@ export default function App() {
           count: msgs.length,
           envelopes: msgs.filter((m) => m.envelope).length,
         });
-        setThreads((prev) => ({ ...prev, [id]: msgs as ChatMessage[] }));
+        const hydrated = msgs.map((msg) => {
+          const plaintext = readCachedMessagePlaintext(session.userId, msg.id);
+          return plaintext ? { ...msg, text: plaintext } : msg;
+        });
+        setThreads((prev) => ({ ...prev, [id]: hydrated as ChatMessage[] }));
       })
       .catch(() => {
         // If history fails to load, keep UI responsive; WS will still deliver new messages.

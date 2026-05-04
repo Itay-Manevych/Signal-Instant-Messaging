@@ -41,4 +41,3 @@ export function initializeReceiverSessionDetailed(
     dh4: dhValues[3],
   };
 }
-

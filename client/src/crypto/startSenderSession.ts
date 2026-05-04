@@ -1,21 +1,18 @@
 import { fetchPreKeyBundle } from '../api';
-import { createDevEnvelope } from './envelope';
+import { associatedData } from './encryptedChat';
 import { loadIdentityKeyPair } from './localAccountKeys';
+import { rememberOutgoingPlaintext } from './localMessageCache';
 import { protocolLog } from './protocolLog';
-import { createSessionFromX3DH } from './sessionManager';
+import { createSessionFromX3DH, updateRatchetState } from './sessionManager';
+import { ratchetEncrypt } from './doubleRatchet';
+import { ratchetInitAlice } from './ratchetInit';
 import { fromBase64, toBase64 } from './signalKeys';
 import { initializeSenderSession, type PreKeyBundle } from './x3dh';
 
 function shortSecret(bytes: Uint8Array): string {
   return toBase64(bytes).slice(0, 16);
 }
-
-export async function startSenderSession(
-  token: string,
-  selfUserId: string,
-  peerUserId: string,
-  plaintext: string,
-) {
+export async function startSenderSession(token: string, selfUserId: string, peerUserId: string, plaintext: string) {
   const identityKeyPair = loadIdentityKeyPair(selfUserId);
   if (!identityKeyPair) throw new Error('Missing local identity key pair');
   protocolLog('[X3DH] No session found, fetching pre-key bundle', { peer: peerUserId.slice(0, 8) });
@@ -52,18 +49,39 @@ export async function startSenderSession(
   });
   createSessionFromX3DH(selfUserId, peerUserId, bundle.identityKey.publicKeyB64, toBase64(result.sharedSecret));
   protocolLog('[X3DH] Sender session initialized', { sharedSecretPrefix: shortSecret(result.sharedSecret) });
+  const ratchetState = ratchetInitAlice(result.sharedSecret, bundle.signedPreKey.publicKeyB64);
+  protocolLog('[DR] Alice ratchet initialized (DEV ONLY)', {
+    rootKey: ratchetState.rootKeyB64,
+    sendingChainKey: ratchetState.sendingChainKeyB64,
+    selfRatchetPublicKey: ratchetState.selfRatchetPublicKeyB64,
+  });
   protocolLog('[X3DH] Shared secret saved in sessionManager', { peer: peerUserId.slice(0, 8) });
-  const envelope = createDevEnvelope(plaintext, {
-    kind: 'initial',
+  const first = await ratchetEncrypt(
+    ratchetState,
+    plaintext,
+    associatedData(selfUserId, peerUserId, identityKeyPair.publicKeyB64),
+  );
+  updateRatchetState(selfUserId, peerUserId, first.state);
+  const envelope = {
+    version: 1 as const,
+    kind: 'initial' as const,
     senderIdentityKeyB64: identityKeyPair.publicKeyB64,
     senderEphemeralKeyB64: toBase64(result.ephemeralPublicKey),
     usedOneTimePreKeyId: result.usedOneTimePreKeyId,
-  });
+    ratchetHeader: first.header,
+    ciphertextB64: first.ciphertextB64,
+    nonceB64: first.nonceB64,
+  };
+  rememberOutgoingPlaintext(selfUserId, envelope, plaintext);
   protocolLog('[X3DH] Sending initial envelope', {
     senderIdentityPublicKey: identityKeyPair.publicKeyB64,
     senderEphemeralPublicKey: toBase64(result.ephemeralPublicKey),
     usedOneTimePreKeyId: result.usedOneTimePreKeyId,
   });
+  protocolLog('[DR] Initial envelope encrypted (DEV ONLY)', {
+    header: JSON.stringify(first.header),
+    ciphertext: first.ciphertextB64,
+    nonce: first.nonceB64,
+  });
   return envelope;
 }
-

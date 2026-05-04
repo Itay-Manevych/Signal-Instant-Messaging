@@ -24,4 +24,3 @@ export interface ReceiverHandshakeResult {
   dh3: Uint8Array;
   dh4?: Uint8Array;
 }
-
