@@ -22,9 +22,10 @@ function toPreKeyBundle(bundle: DeviceBundle['bundle']): PreKeyBundle {
   };
 }
 
-export async function encryptForPeerDevices(token: string, self: DeviceAddress, peerUserId: string, plaintext: string) {
+export async function encryptForPeerDevices(token: string, self: DeviceAddress, peerUserId: string, plaintext: string, allowEmpty = false) {
   const devices = await fetchUserDevices(token, peerUserId, self.deviceId);
   if (devices.length === 0) {
+    if (allowEmpty) return [];
     throw new Error('Recipient has no registered devices yet. They must sign in once before encrypted messages can be sent.');
   }
   return Promise.all(devices.map((device) => encryptForDevice(token, self, peerUserId, device, plaintext)));

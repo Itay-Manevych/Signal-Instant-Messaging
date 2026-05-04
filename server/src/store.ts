@@ -272,7 +272,7 @@ export class UserStore {
 
   addOneTimePreKeys(userId: string, keys: OneTimePreKeyPublic[]): void {
     const insert = this.db.prepare(`
-      INSERT INTO one_time_prekeys (key_id, user_id, public_key_b64, created_at)
+      INSERT OR IGNORE INTO one_time_prekeys (key_id, user_id, public_key_b64, created_at)
       VALUES (?, ?, ?, ?)
     `);
 
@@ -314,7 +314,7 @@ export class UserStore {
 
   addDeviceOneTimePreKeys(userId: string, deviceId: string, keys: OneTimePreKeyPublic[]): void {
     const insert = this.db.prepare(`
-      INSERT INTO device_one_time_prekeys (key_id, user_id, device_id, public_key_b64, created_at)
+      INSERT OR IGNORE INTO device_one_time_prekeys (key_id, user_id, device_id, public_key_b64, created_at)
       VALUES (?, ?, ?, ?, ?)
     `);
     const createdAt = new Date().toISOString();
@@ -488,7 +488,7 @@ export class UserStore {
       WHERE
         (from_user_id = @peer AND to_user_id = @me)
         OR
-        (from_user_id = @me AND to_user_id = @peer AND from_device_id = @device AND sender_visible = 1)
+        (from_user_id = @me AND to_user_id = @peer AND sender_visible = 1)
         OR
         (from_user_id = @me AND to_user_id = @me AND to_device_id = @device AND sync_peer_user_id = @peer)
       ORDER BY sent_at ASC

@@ -235,23 +235,25 @@ export default function App() {
     if (stored) {
       protocolLog('local identity/prekeys loaded', { user: session.username });
       const migratedOpks = normalizeLocalOneTimePreKeyIds(session.userId, session.deviceId);
-      if (migratedOpks?.changed) {
-        const parsed = JSON.parse(stored) as {
-          identityKey?: { publicKeyB64?: string };
-          signedPreKey?: { publicKeyB64?: string; signatureB64?: string };
-        };
-        if (parsed.identityKey?.publicKeyB64 && parsed.signedPreKey?.publicKeyB64 && parsed.signedPreKey.signatureB64) {
-          void publishKeys(session.token, {
-            deviceId: session.deviceId,
-            deviceSecret: session.deviceSecret,
-            deviceName: session.deviceName,
-            identityKeyB64: parsed.identityKey.publicKeyB64,
-            signedPreKeyB64: parsed.signedPreKey.publicKeyB64,
-            signedPreKeySignatureB64: parsed.signedPreKey.signatureB64,
-            oneTimePreKeys: migratedOpks.publicKeys,
-          });
-          protocolLog('legacy OPK ids migrated and republished', { opks: migratedOpks.publicKeys.length });
-        }
+      const parsed = JSON.parse(stored) as {
+        identityKey?: { publicKeyB64?: string };
+        signedPreKey?: { publicKeyB64?: string; signatureB64?: string };
+        oneTimePreKeys?: { id: string; publicKeyB64: string }[];
+      };
+      if (parsed.identityKey?.publicKeyB64 && parsed.signedPreKey?.publicKeyB64 && parsed.signedPreKey.signatureB64) {
+        const publicOpks = migratedOpks?.publicKeys ?? parsed.oneTimePreKeys?.map(({ id, publicKeyB64 }) => ({ id: String(id), publicKeyB64 })) ?? [];
+        void publishKeys(session.token, {
+          deviceId: session.deviceId,
+          deviceSecret: session.deviceSecret,
+          deviceName: session.deviceName,
+          identityKeyB64: parsed.identityKey.publicKeyB64,
+          signedPreKeyB64: parsed.signedPreKey.publicKeyB64,
+          signedPreKeySignatureB64: parsed.signedPreKey.signatureB64,
+          oneTimePreKeys: publicOpks,
+        }).then(() => {
+          void loadDevices(session.token);
+        });
+        protocolLog('device pre-key bundle republished', { opks: publicOpks.length, migrated: Boolean(migratedOpks?.changed) });
       }
       return;
     }
@@ -516,6 +518,7 @@ export default function App() {
         { userId: session.userId, deviceId: session.deviceId },
         session.userId,
         text,
+        true,
       );
       for (const [index, packet] of packets.entries()) {
         protocolLog('envelope created', { kind: packet.envelope.kind, encrypted: true, device: packet.toDeviceId });

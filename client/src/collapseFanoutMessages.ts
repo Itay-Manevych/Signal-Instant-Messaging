@@ -29,12 +29,12 @@ export function collapseFanoutMessages(messages: ChatMsg[]): ChatMsg[] {
 function fanoutKey(m: ChatMsg): string {
   if (!m.clientMessageId) return `id:${m.id}`;
   // Do not include toDeviceId: one logical send fans out to many recipient devices (same ciphertext group).
+  const peerId = m.syncPeerUserId ?? m.toUserId;
   return [
     'cm',
     m.clientMessageId,
     m.fromUserId,
-    m.toUserId,
-    m.syncPeerUserId ?? '',
+    peerId,
     m.fromDeviceId ?? '',
   ].join(':');
 }
