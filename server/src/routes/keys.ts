@@ -17,7 +17,29 @@ function normalizeOneTimePreKeys(body: {
   }));
 }
 
+function resolveUserId(store: UserStore, input: string): string | null {
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input);
+  return isUuid ? input : store.getIdByUsername(input);
+}
+
 export async function registerKeyRoutes(app: FastifyInstance, store: UserStore): Promise<void> {
+  app.get('/api/keys/devices', { onRequest: [app.authenticate] }, async (request) => {
+    const me = request.user as { sub: string };
+    return { devices: store.listDevices(me.sub) };
+  });
+
+  app.get('/api/keys/devices/:userIdOrName', { onRequest: [app.authenticate] }, async (request, reply) => {
+    const params = request.params as { userIdOrName?: string } | undefined;
+    const query = request.query as { exceptDeviceId?: string } | undefined;
+    const input = params?.userIdOrName ?? '';
+    const userId = input ? resolveUserId(store, input) : null;
+    if (!userId) return reply.code(404).send({ error: 'Unknown user' });
+    return {
+      userId,
+      devices: store.listDevices(userId).filter((device) => device.deviceId !== query?.exceptDeviceId),
+    };
+  });
+
   // Publish full set of public keys
   app.post('/api/keys/publish', { onRequest: [app.authenticate] }, async (request, reply) => {
     const me = request.user as { sub: string; username: string };
@@ -25,6 +47,9 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
       identityKeyB64?: string;
       signedPreKeyB64?: string;
       signedPreKeySignatureB64?: string;
+      deviceId?: string;
+      deviceSecret?: string;
+      deviceName?: string;
       oneTimePreKeys?: OneTimePreKeyPublic[];
       oneTimePreKeysB64?: string[];
     } | undefined;
@@ -33,7 +58,22 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
       return reply.code(400).send({ error: 'Missing required keys' });
     }
 
-    // 1. Identity Key
+    const deviceId = body.deviceId?.trim() || 'default';
+    store.upsertDevice(me.sub, deviceId, body.deviceName ?? 'Browser', body.deviceSecret);
+
+    store.publishDeviceKeys(me.sub, deviceId, body.deviceSecret, {
+      identityKey: {
+        keyType: 'x25519',
+        publicKeyB64: body.identityKeyB64,
+      },
+      signedPreKey: {
+        publicKeyB64: body.signedPreKeyB64,
+        signatureB64: body.signedPreKeySignatureB64,
+      },
+      oneTimePreKeys: normalizeOneTimePreKeys(body),
+    });
+
+    // Legacy single-device rows stay populated for older clients.
     store.upsertIdentityKey(me.sub, {
       keyType: 'x25519',
       publicKeyB64: body.identityKeyB64,
@@ -45,7 +85,6 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
       signatureB64: body.signedPreKeySignatureB64,
     });
 
-    // 3. One-Time Pre-Keys (optional/incremental)
     const oneTimePreKeys = normalizeOneTimePreKeys(body);
     if (oneTimePreKeys.length > 0) {
       store.addOneTimePreKeys(me.sub, oneTimePreKeys);
@@ -54,9 +93,10 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
     protocolLog('public pre-key bundle published', {
       user: me.username,
       id: me.sub.slice(0, 8),
+      device: deviceId,
       opks: oneTimePreKeys.length,
     });
-    return { ok: true };
+    return { ok: true, deviceId };
   });
 
   // Fetch another user's pre-key bundle for X3DH
@@ -65,17 +105,59 @@ export async function registerKeyRoutes(app: FastifyInstance, store: UserStore):
     { onRequest: [app.authenticate] },
     async (request, reply) => {
       const params = request.params as { userIdOrName?: string } | undefined;
+      const query = request.query as { exceptDeviceId?: string; deviceId?: string } | undefined;
       const input = params?.userIdOrName ?? '';
       if (!input) return reply.code(400).send({ error: 'Missing userIdOrName' });
 
-      // Try to resolve as UUID first, then as username
-      let userId = input;
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input);
-      
-      if (!isUuid) {
-        const resolvedId = store.getIdByUsername(input);
-        if (!resolvedId) return reply.code(404).send({ error: `User "${input}" not found` });
-        userId = resolvedId;
+      const userId = resolveUserId(store, input);
+      if (!userId) return reply.code(404).send({ error: `User "${input}" not found` });
+
+      if (query?.deviceId) {
+        const bundle = store.getDevicePreKeyBundle(userId, query.deviceId);
+        if (!bundle) return reply.code(404).send({ error: 'Device pre-key bundle not found' });
+        return {
+          userId,
+          devices: [{
+            userId,
+            deviceId: bundle.deviceId,
+            bundle: {
+              identityKey: bundle.identityKey,
+              signedPreKey: bundle.signedPreKey,
+              ...(bundle.oneTimePreKey
+                ? {
+                    oneTimePreKeyId: bundle.oneTimePreKey.id,
+                    oneTimePreKeyPublicKey: bundle.oneTimePreKey.publicKeyB64,
+                  }
+                : {}),
+            },
+          }],
+        };
+      }
+
+      const deviceBundles = store.listDevicePreKeyBundles(userId, query?.exceptDeviceId);
+      if (deviceBundles.length > 0) {
+        protocolLog('device pre-key bundles fetched', {
+          requester: (request.user as { sub: string }).sub.slice(0, 8),
+          target: userId.slice(0, 8),
+          devices: deviceBundles.length,
+        });
+        return {
+          userId,
+          devices: deviceBundles.map((bundle) => ({
+            userId,
+            deviceId: bundle.deviceId,
+            bundle: {
+              identityKey: bundle.identityKey,
+              signedPreKey: bundle.signedPreKey,
+              ...(bundle.oneTimePreKey
+                ? {
+                    oneTimePreKeyId: bundle.oneTimePreKey.id,
+                    oneTimePreKeyPublicKey: bundle.oneTimePreKey.publicKeyB64,
+                  }
+                : {}),
+            },
+          })),
+        };
       }
 
       const bundle = store.getPreKeyBundle(userId);

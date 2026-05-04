@@ -9,6 +9,7 @@ export type RatchetHeader = {
 export type ChatEnvelope = {
   version: 1;
   kind: 'initial' | 'ratchet';
+  sesameSessionId?: string;
   senderIdentityKeyB64: string;
   senderEphemeralKeyB64?: string;
   usedOneTimePreKeyId?: string;
@@ -22,6 +23,7 @@ export function isChatEnvelope(value: unknown): value is ChatEnvelope {
   const e = value as Partial<ChatEnvelope>;
   if (e.version !== 1) return false;
   if (e.kind !== 'initial' && e.kind !== 'ratchet') return false;
+  if (e.sesameSessionId !== undefined && typeof e.sesameSessionId !== 'string') return false;
   if (typeof e.senderIdentityKeyB64 !== 'string' || !e.senderIdentityKeyB64) return false;
   if (typeof e.ciphertextB64 !== 'string' || !e.ciphertextB64) return false;
   if (e.senderEphemeralKeyB64 !== undefined && typeof e.senderEphemeralKeyB64 !== 'string') return false;
@@ -46,10 +48,19 @@ export function isChatEnvelope(value: unknown): value is ChatEnvelope {
 export type WsClientMessage =
   | { type: 'ping' }
   | { type: 'chat'; toUserId: string; text: string }
-  | { type: 'chat'; toUserId: string; envelope: ChatEnvelope };
+  | {
+      type: 'chat';
+      toUserId: string;
+      toDeviceId?: string;
+      sesameSessionId?: string;
+      clientMessageId?: string;
+      syncPeerUserId?: string;
+      senderEcho?: boolean;
+      envelope: ChatEnvelope;
+    };
 
 export type WsServerMessage =
-  | { type: 'connected'; userId: string; username: string }
+  | { type: 'connected'; userId: string; username: string; deviceId?: string }
   | { type: 'pong' }
   | { type: 'presence'; online: { userId: string; username: string }[] }
   | {
@@ -57,7 +68,12 @@ export type WsServerMessage =
       id: string;
       fromUserId: string;
       fromUsername: string;
+      fromDeviceId?: string;
       toUserId: string;
+      toDeviceId?: string;
+      sesameSessionId?: string;
+      clientMessageId?: string;
+      syncPeerUserId?: string;
       text?: string;
       envelope?: ChatEnvelope;
       sentAt: string;

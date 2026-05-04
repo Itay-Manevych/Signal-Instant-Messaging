@@ -4,8 +4,13 @@ import { protocolLog } from './protocolLog';
 import { ratchetDecrypt, ratchetEncrypt } from './doubleRatchet';
 import type { RatchetState } from './ratchetTypes';
 
-export function associatedData(fromUserId: string, toUserId: string, senderIdentityKeyB64: string) {
-  return JSON.stringify({ fromUserId, toUserId, senderIdentityKeyB64 });
+export function associatedData(
+  fromUserId: string,
+  toUserId: string,
+  senderIdentityKeyB64: string,
+  device?: { fromDeviceId?: string; toDeviceId?: string; sesameSessionId?: string },
+) {
+  return JSON.stringify({ fromUserId, toUserId, senderIdentityKeyB64, ...device });
 }
 
 export async function encryptRatchetEnvelope(
@@ -15,11 +20,13 @@ export async function encryptRatchetEnvelope(
   senderIdentityKeyB64: string,
   fromUserId: string,
   toUserId: string,
+  device?: { fromDeviceId?: string; toDeviceId?: string; sesameSessionId?: string },
 ) {
-  const first = await ratchetEncrypt(state, plaintext, associatedData(fromUserId, toUserId, senderIdentityKeyB64));
+  const first = await ratchetEncrypt(state, plaintext, associatedData(fromUserId, toUserId, senderIdentityKeyB64, device));
   const envelope: ChatEnvelope = {
     version: 1,
     kind: 'ratchet',
+    sesameSessionId: device?.sesameSessionId,
     senderIdentityKeyB64,
     ratchetHeader: first.header,
     ciphertextB64: first.ciphertextB64,
@@ -34,14 +41,20 @@ export async function encryptRatchetEnvelope(
   return { state: first.state, envelope };
 }
 
-export async function decryptRatchetEnvelope(state: RatchetState, envelope: ChatEnvelope, fromUserId: string, toUserId: string) {
+export async function decryptRatchetEnvelope(
+  state: RatchetState,
+  envelope: ChatEnvelope,
+  fromUserId: string,
+  toUserId: string,
+  device?: { fromDeviceId?: string; toDeviceId?: string; sesameSessionId?: string },
+) {
   if (!envelope.ratchetHeader || !envelope.nonceB64) throw new Error('Missing ratchet payload');
   const result = await ratchetDecrypt(
     state,
     envelope.ratchetHeader,
     envelope.ciphertextB64,
     envelope.nonceB64,
-    associatedData(fromUserId, toUserId, envelope.senderIdentityKeyB64),
+    associatedData(fromUserId, toUserId, envelope.senderIdentityKeyB64, device),
   );
   protocolLog('[DR] Ratchet decrypt (DEV ONLY)', {
     header: JSON.stringify(envelope.ratchetHeader),

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
-import type { ConnectionHub, PendingChatMessage, UserStore } from '../store.js';
+import type { ClientSocket, ConnectionHub, PendingChatMessage, UserStore } from '../store.js';
 import { isChatEnvelope, type WsClientMessage, type WsServerMessage } from '../protocol.js';
 import { chatLogFields, protocolLog } from '../logging.js';
 
@@ -10,6 +10,18 @@ function parseQueryToken(url: string | undefined): string | null {
   const q = url.includes('?') ? url.slice(url.indexOf('?')) : '';
   const params = new URLSearchParams(q);
   return params.get('token');
+}
+
+function parseQueryDeviceId(url: string | undefined): string {
+  if (!url) return 'default';
+  const q = url.includes('?') ? url.slice(url.indexOf('?')) : '';
+  return new URLSearchParams(q).get('deviceId') || 'default';
+}
+
+function parseQueryDeviceSecret(url: string | undefined): string {
+  if (!url) return '';
+  const q = url.includes('?') ? url.slice(url.indexOf('?')) : '';
+  return new URLSearchParams(q).get('deviceSecret') || '';
 }
 
 function broadcastPresence(
@@ -22,7 +34,7 @@ function broadcastPresence(
   });
   const payload: WsServerMessage = { type: 'presence', online };
   for (const id of hub.onlineUserIds()) {
-    hub.sendTo(id, payload);
+    hub.sendToUserDevices(id, payload);
   }
 }
 
@@ -40,6 +52,8 @@ export function registerWsRoutes(
 
     let userId: string;
     let username: string;
+    const deviceId = parseQueryDeviceId(req.url);
+    const deviceSecret = parseQueryDeviceSecret(req.url);
     try {
       const payload = app.jwt.verify<{ sub: string; username: string }>(rawToken);
       userId = payload.sub;
@@ -55,22 +69,33 @@ export function registerWsRoutes(
       return;
     }
 
-    hub.add(userId, {
+    if (!deviceSecret) {
+      socket.close(4401, 'Missing device secret');
+      return;
+    }
+    store.upsertDevice(userId, deviceId, 'Browser', deviceSecret);
+    if (!store.verifyDeviceSecret(userId, deviceId, deviceSecret)) {
+      socket.close(4401, 'Invalid device secret');
+      return;
+    }
+    const clientSocket: ClientSocket = {
       send: (data) => socket.send(data),
       close: (code, reason) => socket.close(code, reason),
-    });
-    protocolLog('ws connected', { user: username, id: userId.slice(0, 8) });
+    };
+    hub.add(userId, deviceId, clientSocket);
+    protocolLog('ws connected', { user: username, id: userId.slice(0, 8), device: deviceId.slice(0, 8) });
 
     const connected: WsServerMessage = {
       type: 'connected',
       userId,
       username: user.username,
+      deviceId,
     };
     socket.send(JSON.stringify(connected));
     broadcastPresence(hub, store);
 
     // Flush queued messages for this user (offline delivery).
-    const pending = store.listPendingMessagesForUser(userId);
+    const pending = store.listPendingMessagesForDevice(userId, deviceId);
     if (pending.length > 0) {
       protocolLog('offline messages flushed', { user: username, count: pending.length });
       for (const msg of pending) {
@@ -105,8 +130,18 @@ export function registerWsRoutes(
 
       if (msg.type === 'chat') {
         const toUserId = typeof msg.toUserId === 'string' ? msg.toUserId : '';
+        const toDeviceId = 'toDeviceId' in msg && typeof msg.toDeviceId === 'string' ? msg.toDeviceId : 'default';
         const text = 'text' in msg && typeof msg.text === 'string' ? msg.text : '';
         const envelope = 'envelope' in msg && isChatEnvelope(msg.envelope) ? msg.envelope : undefined;
+        const sesameSessionId = 'sesameSessionId' in msg && typeof msg.sesameSessionId === 'string'
+          ? msg.sesameSessionId
+          : envelope?.sesameSessionId;
+        const clientMessageId = 'clientMessageId' in msg && typeof msg.clientMessageId === 'string'
+          ? msg.clientMessageId
+          : undefined;
+        const syncPeerUserId = 'syncPeerUserId' in msg && typeof msg.syncPeerUserId === 'string'
+          ? msg.syncPeerUserId
+          : undefined;
         if (!toUserId || (!text.trim() && !envelope)) {
           const err: WsServerMessage = {
             type: 'error',
@@ -124,7 +159,7 @@ export function registerWsRoutes(
           socket.send(JSON.stringify(err));
           return;
         }
-        if (toUserId === userId) {
+        if (toUserId === userId && !syncPeerUserId) {
           const err: WsServerMessage = {
             type: 'error',
             message: 'Cannot message yourself',
@@ -141,12 +176,22 @@ export function registerWsRoutes(
           socket.send(JSON.stringify(err));
           return;
         }
+        if (syncPeerUserId && !store.getById(syncPeerUserId)) {
+          socket.send(JSON.stringify({ type: 'error', message: 'Unknown sync peer' } satisfies WsServerMessage));
+          return;
+        }
 
         const out: PendingChatMessage = {
           id: randomUUID(),
           fromUserId: userId,
           fromUsername: user.username,
+          fromDeviceId: deviceId,
           toUserId,
+          toDeviceId,
+          ...(sesameSessionId ? { sesameSessionId } : {}),
+          ...(clientMessageId ? { clientMessageId } : {}),
+          ...(syncPeerUserId ? { syncPeerUserId } : {}),
+          senderVisible: !('senderEcho' in msg) || msg.senderEcho !== false,
           ...(text.trim() ? { text } : {}),
           ...(envelope ? { envelope } : {}),
           sentAt: new Date().toISOString(),
@@ -157,10 +202,11 @@ export function registerWsRoutes(
         protocolLog('chat stored', chatLogFields(out));
 
         // Always echo to sender.
-        hub.sendTo(userId, { type: 'chat', ...out } satisfies WsServerMessage);
+        const shouldEcho = !('senderEcho' in msg) || msg.senderEcho !== false;
+        if (shouldEcho) hub.sendToDevice(userId, deviceId, { type: 'chat', ...out } satisfies WsServerMessage);
 
         // If recipient is online, deliver immediately; otherwise enqueue for later.
-        const delivered = hub.sendTo(toUserId, { type: 'chat', ...out } satisfies WsServerMessage);
+        const delivered = hub.sendToDevice(toUserId, toDeviceId, { type: 'chat', ...out } satisfies WsServerMessage);
         protocolLog('chat routed', { ...chatLogFields(out), delivered });
         if (!delivered) {
           store.enqueuePendingMessage(out);
@@ -174,8 +220,8 @@ export function registerWsRoutes(
     });
 
     socket.on('close', () => {
-      hub.remove(userId);
-      protocolLog('ws disconnected', { user: username, id: userId.slice(0, 8) });
+      hub.remove(userId, deviceId, clientSocket);
+      protocolLog('ws disconnected', { user: username, id: userId.slice(0, 8), device: deviceId.slice(0, 8) });
       broadcastPresence(hub, store);
     });
   });

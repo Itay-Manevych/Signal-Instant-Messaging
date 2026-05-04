@@ -12,21 +12,21 @@ type StoredAccountKeys = {
   oneTimePreKeys?: StoredOneTimePreKey[];
 };
 
-function storageKey(userId: string): string {
-  return `signal-keys-${userId}`;
+function storageKey(userId: string, deviceId?: string): string {
+  return deviceId ? `signal-keys-${userId}-${deviceId}` : `signal-keys-${userId}`;
 }
 
-export function loadStoredAccountKeys(userId: string): StoredAccountKeys | null {
+export function loadStoredAccountKeys(userId: string, deviceId?: string): StoredAccountKeys | null {
   try {
-    const raw = localStorage.getItem(storageKey(userId));
+    const raw = localStorage.getItem(storageKey(userId, deviceId)) ?? localStorage.getItem(storageKey(userId));
     return raw ? (JSON.parse(raw) as StoredAccountKeys) : null;
   } catch {
     return null;
   }
 }
 
-export function loadIdentityKeyPair(userId: string) {
-  const keys = loadStoredAccountKeys(userId);
+export function loadIdentityKeyPair(userId: string, deviceId?: string) {
+  const keys = loadStoredAccountKeys(userId, deviceId);
   const identity = keys?.identityKey;
   if (!identity?.publicKeyB64 || !identity.privateKeyB64) return null;
   return {
@@ -35,8 +35,8 @@ export function loadIdentityKeyPair(userId: string) {
   };
 }
 
-export function loadReceiverHandshakeKeys(userId: string) {
-  const keys = loadStoredAccountKeys(userId);
+export function loadReceiverHandshakeKeys(userId: string, deviceId?: string) {
+  const keys = loadStoredAccountKeys(userId, deviceId);
   const identity = keys?.identityKey;
   const signedPreKey = keys?.signedPreKey;
   if (!identity?.privateKeyB64 || !signedPreKey?.privateKeyB64 || !signedPreKey.publicKeyB64) return null;
