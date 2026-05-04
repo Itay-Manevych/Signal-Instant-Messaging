@@ -4,6 +4,14 @@ import { fetchConversation, fetchUsers, login, publishKeys, register } from './a
 import type { WsServerMessage } from './protocol';
 import { generateIdentityKeyPair, generateOneTimePreKeyPair, generateSignedPreKeyPair, toBase64 } from './crypto/signalKeys';
 import { sign } from './crypto/signalCrypto';
+import { devBase64ToUtf8, loadSenderIdentityKeyB64 } from './crypto/envelope';
+import { cacheMessagePlaintext, decryptRatchetEnvelope, encryptRatchetEnvelope, readCachedMessagePlaintext, resolveOutgoingPlaintext } from './crypto/encryptedChat';
+import { normalizeLocalOneTimePreKeyIds } from './crypto/localOneTimePreKeys';
+import { getSession, listSessions, updateRatchetState } from './crypto/sessionManager';
+import { protocolLog, protocolWarn, shortId } from './crypto/protocolLog';
+import { handleInitialEnvelope } from './crypto/handleInitialEnvelope';
+import type { RatchetState } from './crypto/ratchetTypes';
+import { startSenderSession } from './crypto/startSenderSession';
 
 const TOKEN_KEY = 'signal-im-token';
 const USER_KEY = 'signal-im-user';
@@ -29,6 +37,23 @@ function formatDayLabel(iso: string): string {
     month: 'short',
     day: 'numeric',
   });
+}
+
+function messageText(msg: ChatMessage): string {
+  if (msg.text) return msg.text;
+  if (!msg.envelope) return '';
+  try {
+    // TODO: Replace this dev decode with Double Ratchet AEAD decryption.
+    return devBase64ToUtf8(msg.envelope.ciphertextB64);
+  } catch {
+    return '[encrypted message]';
+  }
+}
+
+function newOneTimePreKeyId(index: number): string {
+  return typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `opk-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
 }
 
 function loadSession(): Session | null {
@@ -173,26 +198,43 @@ export default function App() {
     const stored = localStorage.getItem(KEY_STORAGE_PREFIX);
 
     if (stored) {
-      console.log('✅ Keys already exist in localStorage for', session.username);
+      protocolLog('local identity/prekeys loaded', { user: session.username });
+      const migratedOpks = normalizeLocalOneTimePreKeyIds(session.userId);
+      if (migratedOpks?.changed) {
+        const parsed = JSON.parse(stored) as {
+          identityKey?: { publicKeyB64?: string };
+          signedPreKey?: { publicKeyB64?: string; signatureB64?: string };
+        };
+        if (parsed.identityKey?.publicKeyB64 && parsed.signedPreKey?.publicKeyB64 && parsed.signedPreKey.signatureB64) {
+          void publishKeys(session.token, {
+            identityKeyB64: parsed.identityKey.publicKeyB64,
+            signedPreKeyB64: parsed.signedPreKey.publicKeyB64,
+            signedPreKeySignatureB64: parsed.signedPreKey.signatureB64,
+            oneTimePreKeys: migratedOpks.publicKeys,
+          });
+          protocolLog('legacy OPK ids migrated and republished', { opks: migratedOpks.publicKeys.length });
+        }
+      }
       return;
     }
 
     if (enrollingRef.current) return;
     enrollingRef.current = true;
 
-    console.log('🚀 No keys found. Starting Automated Enrollment for', session.username);
+    protocolLog('local keys missing; starting pre-key enrollment', { user: session.username });
 
     const enroll = async () => {
       try {
         // 1. Generate local keys
+        protocolLog('generating identity key, signed prekey, and OPKs');
         const ik = generateIdentityKeyPair();
         const spk = generateSignedPreKeyPair();
         const sig = sign(ik.privateKey, spk.publicKey);
 
-        const opks: { id: number; publicKey: Uint8Array; privateKey: Uint8Array }[] = [];
+        const opks: { id: string; publicKey: Uint8Array; privateKey: Uint8Array }[] = [];
         for (let i = 0; i < 50; i++) {
           const pair = generateOneTimePreKeyPair();
-          opks.push({ id: i, ...pair });
+          opks.push({ id: newOneTimePreKeyId(i), ...pair });
         }
 
         const fullState = {
@@ -215,19 +257,25 @@ export default function App() {
         // 2. Publish public components to server FIRST
         // If this fails, we catch it and don't save to localStorage, 
         // allowing the effect to retry on the next session trigger.
+        protocolLog('publishing public pre-key bundle', { opks: fullState.oneTimePreKeys.length });
         await publishKeys(session.token, {
           identityKeyB64: fullState.identityKey.publicKeyB64,
           signedPreKeyB64: fullState.signedPreKey.publicKeyB64,
           signedPreKeySignatureB64: fullState.signedPreKey.signatureB64,
-          oneTimePreKeysB64: fullState.oneTimePreKeys.map((o) => o.publicKeyB64),
+          oneTimePreKeys: fullState.oneTimePreKeys.map(({ id, publicKeyB64 }) => ({
+            id,
+            publicKeyB64,
+          })),
         });
 
         // 3. Save private + public keys to localStorage ONLY after success
         localStorage.setItem(KEY_STORAGE_PREFIX, JSON.stringify(fullState));
 
-        console.log('✨ Enrollment successful: Public keys published for', session.username);
+        protocolLog('pre-key enrollment complete', { user: session.username });
       } catch (err) {
-        console.error('❌ Enrollment failed:', err);
+        protocolWarn('pre-key enrollment failed', {
+          reason: err instanceof Error ? err.message : 'unknown',
+        });
       } finally {
         enrollingRef.current = false;
       }
@@ -250,12 +298,17 @@ export default function App() {
 
     setWsState('connecting');
     setWsError(null);
+    protocolLog('websocket connecting', { user: session.username });
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
       setWsState('open');
       setWsError(null);
+      protocolLog('websocket open', {
+        user: session.username,
+        sessions: listSessions(session.userId).length,
+      });
       void loadPeers(session.token);
     };
 
@@ -274,6 +327,7 @@ export default function App() {
 
     ws.onerror = () => {
       // Browsers give little detail here; treat it as a hint, not a hard failure.
+      protocolWarn('websocket error');
       setWsError((prev) => prev ?? 'WebSocket error');
     };
 
@@ -292,17 +346,51 @@ export default function App() {
       }
       if (msg.type === 'chat') {
         const peerId = peerIdForMessage(msg, session.userId);
-        setThreads((prev) => {
-          const list = prev[peerId] ?? [];
-          if (list.some((m) => m.id === msg.id)) return prev;
-          return { ...prev, [peerId]: [...list, msg] };
-        });
-        if (msg.fromUserId !== session.userId) {
-          setPeerList((prev) => {
-            if (prev.some((p) => p.id === msg.fromUserId)) return prev;
-            return [...prev, { id: msg.fromUserId, username: msg.fromUsername }];
+        void (async () => {
+          let storedSession = getSession(session.userId, peerId);
+          let plaintext = msg.text ?? null;
+          if (msg.envelope?.kind === 'initial' && !storedSession && msg.fromUserId !== session.userId) {
+            try {
+              const result = await handleInitialEnvelope(session.userId, msg.fromUserId, msg.envelope);
+              storedSession = getSession(session.userId, peerId);
+              plaintext = result.plaintext;
+              protocolLog('[X3DH] Receiver session ready for message', {
+                from: shortId(msg.fromUserId),
+                sharedSecretPrefix: result.sharedSecretPrefix,
+              });
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : 'receiver session init failed';
+              protocolWarn('receiver X3DH failed', { reason, from: shortId(msg.fromUserId) });
+            }
+          }
+          if (msg.envelope?.kind === 'ratchet' && storedSession?.ratchetState && msg.fromUserId !== session.userId) {
+            const result = await decryptRatchetEnvelope(storedSession.ratchetState as RatchetState, msg.envelope, msg.fromUserId, session.userId);
+            updateRatchetState(session.userId, peerId, result.state);
+            storedSession = getSession(session.userId, peerId);
+            plaintext = result.plaintext;
+          }
+          if (msg.envelope && msg.fromUserId === session.userId) {
+            plaintext = resolveOutgoingPlaintext(session.userId, msg.envelope) ?? plaintext;
+          }
+          if (!plaintext) plaintext = readCachedMessagePlaintext(session.userId, msg.id);
+          if (plaintext) cacheMessagePlaintext(session.userId, msg.id, plaintext);
+          protocolLog('chat received', {
+            from: shortId(msg.fromUserId),
+            format: msg.envelope ? 'envelope' : 'legacy-text',
+            session: storedSession?.isInitialized ? 'initialized' : 'missing',
           });
-        }
+          setThreads((prev) => {
+            const list = prev[peerId] ?? [];
+            if (list.some((m) => m.id === msg.id)) return prev;
+            return { ...prev, [peerId]: [...list, plaintext ? { ...msg, text: plaintext } : msg] };
+          });
+          if (msg.fromUserId !== session.userId) {
+            setPeerList((prev) => {
+              if (prev.some((p) => p.id === msg.fromUserId)) return prev;
+              return [...prev, { id: msg.fromUserId, username: msg.fromUsername }];
+            });
+          }
+        })();
         return;
       }
       if (msg.type === 'error') {
@@ -361,13 +449,48 @@ export default function App() {
     setWsError(null);
   };
 
-  const sendChat = () => {
+  const sendChat = async () => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN || !recipientId) return;
+    if (!session || !ws || ws.readyState !== WebSocket.OPEN || !recipientId) return;
     const text = draft.trim();
     if (!text) return;
-    ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, text }));
-    setDraft('');
+    const storedSession = getSession(session.userId, recipientId);
+    protocolLog('send requested', {
+      to: shortId(recipientId),
+      session: storedSession?.isInitialized ? 'initialized' : 'missing',
+    });
+    try {
+      const envelope = storedSession
+        ? (() => {
+            protocolLog('[X3DH] Existing session found, skipping X3DH', { peer: shortId(recipientId) });
+            if (!storedSession.ratchetState) throw new Error('Missing ratchet state');
+            return null;
+          })()
+        : await startSenderSession(session.token, session.userId, recipientId, text);
+      const finalEnvelope = envelope ?? (
+        await (async () => {
+          const senderIdentityKeyB64 = loadSenderIdentityKeyB64(session.userId);
+          const result = await encryptRatchetEnvelope(
+            session.userId,
+            storedSession!.ratchetState as RatchetState,
+            text,
+            senderIdentityKeyB64,
+            session.userId,
+            recipientId,
+          );
+          updateRatchetState(session.userId, recipientId, result.state);
+          return result.envelope;
+        })()
+      );
+      protocolLog('envelope created', { kind: finalEnvelope.kind, encrypted: true });
+      ws.send(JSON.stringify({ type: 'chat', toUserId: recipientId, envelope: finalEnvelope }));
+      protocolLog('envelope sent over websocket', { to: shortId(recipientId) });
+      setDraft('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to send message';
+      protocolWarn('send failed', { reason: message });
+      setWsError(message);
+    }
   };
 
   const sortedPeers = useMemo(
@@ -394,9 +517,23 @@ export default function App() {
     setRecipientId(id);
     setDraft('');
     if (!session) return;
+    const storedSession = getSession(session.userId, id);
+    protocolLog('conversation selected', {
+      peer: shortId(id),
+      session: storedSession?.isInitialized ? 'initialized' : 'missing',
+    });
     fetchConversation(session.token, id)
       .then((msgs) => {
-        setThreads((prev) => ({ ...prev, [id]: msgs as ChatMessage[] }));
+        protocolLog('history received', {
+          peer: shortId(id),
+          count: msgs.length,
+          envelopes: msgs.filter((m) => m.envelope).length,
+        });
+        const hydrated = msgs.map((msg) => {
+          const plaintext = readCachedMessagePlaintext(session.userId, msg.id);
+          return plaintext ? { ...msg, text: plaintext } : msg;
+        });
+        setThreads((prev) => ({ ...prev, [id]: hydrated as ChatMessage[] }));
       })
       .catch(() => {
         // If history fails to load, keep UI responsive; WS will still deliver new messages.
@@ -609,7 +746,7 @@ export default function App() {
                           {mine ? 'You' : m.fromUsername} ·{' '}
                           {new Date(m.sentAt).toLocaleTimeString()}
                         </div>
-                        <div className="text">{m.text}</div>
+                        <div className="text">{messageText(m)}</div>
                       </div>
                     </div>
                   );

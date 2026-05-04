@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import type { Db } from './db.js';
+import { isChatEnvelope, type ChatEnvelope } from './protocol.js';
 
 export type PublicUser = { id: string; username: string };
 export type IdentityKeyPublic = { keyType: 'x25519'; publicKeyB64: string };
@@ -9,7 +10,8 @@ export type PendingChatMessage = {
   fromUserId: string;
   fromUsername: string;
   toUserId: string;
-  text: string;
+  text?: string;
+  envelope?: ChatEnvelope;
   sentAt: string;
 };
 
@@ -18,13 +20,15 @@ export type SignedPreKeyPublic = {
   signatureB64: string;
 };
 
+export type OneTimePreKeyPublic = {
+  id: string;
+  publicKeyB64: string;
+};
+
 export type PreKeyBundle = {
   identityKey: IdentityKeyPublic;
   signedPreKey: SignedPreKeyPublic;
-  oneTimePreKey?: {
-    id: number;
-    publicKeyB64: string;
-  };
+  oneTimePreKey?: OneTimePreKeyPublic;
 };
 
 type UserRecord = {
@@ -32,6 +36,29 @@ type UserRecord = {
   username: string;
   passwordHash: string;
 };
+
+function parseEnvelope(json: string | null): ChatEnvelope | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return isChatEnvelope(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rowToMessage(row: PendingChatMessage & { envelopeJson: string | null }): PendingChatMessage {
+  const envelope = parseEnvelope(row.envelopeJson);
+  return {
+    id: row.id,
+    fromUserId: row.fromUserId,
+    fromUsername: row.fromUsername,
+    toUserId: row.toUserId,
+    ...(row.text ? { text: row.text } : {}),
+    ...(envelope ? { envelope } : {}),
+    sentAt: row.sentAt,
+  };
+}
 
 export class UserStore {
   constructor(private db: Db) {}
@@ -181,20 +208,20 @@ export class UserStore {
       });
   }
 
-  addOneTimePreKeys(userId: string, publicKeysB64: string[]): void {
+  addOneTimePreKeys(userId: string, keys: OneTimePreKeyPublic[]): void {
     const insert = this.db.prepare(`
-      INSERT INTO one_time_prekeys (user_id, public_key_b64, created_at)
-      VALUES (?, ?, ?)
+      INSERT INTO one_time_prekeys (key_id, user_id, public_key_b64, created_at)
+      VALUES (?, ?, ?, ?)
     `);
 
     const createdAt = new Date().toISOString();
-    const transaction = this.db.transaction((keys: string[]) => {
-      for (const key of keys) {
-        insert.run(userId, key, createdAt);
+    const transaction = this.db.transaction((items: OneTimePreKeyPublic[]) => {
+      for (const key of items) {
+        insert.run(key.id, userId, key.publicKeyB64, createdAt);
       }
     });
 
-    transaction(publicKeysB64);
+    transaction(keys);
   }
 
   getPreKeyBundle(userId: string): PreKeyBundle | null {
@@ -219,13 +246,14 @@ export class UserStore {
       .prepare(
         `
         SELECT id, public_key_b64 AS publicKeyB64
+        , COALESCE(key_id, CAST(id AS TEXT)) AS keyId
         FROM one_time_prekeys
         WHERE user_id = ?
-        ORDER BY RANDOM()
+        ORDER BY key_id IS NULL, RANDOM()
         LIMIT 1
       `,
       )
-      .get(userId) as { id: number; publicKeyB64: string } | undefined;
+      .get(userId) as { id: number; keyId: string; publicKeyB64: string } | undefined;
 
     // If we found one, delete it so it's truly "one-time"
     if (otpk) {
@@ -235,7 +263,7 @@ export class UserStore {
     return {
       identityKey,
       signedPreKey,
-      oneTimePreKey: otpk,
+      oneTimePreKey: otpk ? { id: otpk.keyId, publicKeyB64: otpk.publicKeyB64 } : undefined,
     };
   }
 
@@ -244,10 +272,12 @@ export class UserStore {
       .prepare(
         `
         INSERT INTO messages (
-          id, from_user_id, from_username, to_user_id, text, sent_at, created_at
+          id, from_user_id, from_username, to_user_id, text,
+          envelope_json, sent_at, created_at
         )
         VALUES (
-          @id, @from_user_id, @from_username, @to_user_id, @text, @sent_at, @created_at
+          @id, @from_user_id, @from_username, @to_user_id, @text,
+          @envelope_json, @sent_at, @created_at
         )
       `,
       )
@@ -256,7 +286,8 @@ export class UserStore {
         from_user_id: msg.fromUserId,
         from_username: msg.fromUsername,
         to_user_id: msg.toUserId,
-        text: msg.text,
+        text: msg.text ?? '',
+        envelope_json: msg.envelope ? JSON.stringify(msg.envelope) : null,
         sent_at: msg.sentAt,
         created_at: new Date().toISOString(),
       });
@@ -272,6 +303,7 @@ export class UserStore {
           from_username AS fromUsername,
           to_user_id AS toUserId,
           text,
+          envelope_json AS envelopeJson,
           sent_at AS sentAt
         FROM messages
         WHERE
@@ -282,8 +314,8 @@ export class UserStore {
         LIMIT @limit
       `,
       )
-      .all({ me: userId, peer: peerId, limit }) as PendingChatMessage[];
-    return rows;
+      .all({ me: userId, peer: peerId, limit }) as (PendingChatMessage & { envelopeJson: string | null })[];
+    return rows.map(rowToMessage);
   }
 
   enqueuePendingMessage(msg: PendingChatMessage): void {
@@ -291,10 +323,12 @@ export class UserStore {
       .prepare(
         `
         INSERT INTO pending_messages (
-          id, from_user_id, from_username, to_user_id, text, sent_at, created_at
+          id, from_user_id, from_username, to_user_id, text,
+          envelope_json, sent_at, created_at
         )
         VALUES (
-          @id, @from_user_id, @from_username, @to_user_id, @text, @sent_at, @created_at
+          @id, @from_user_id, @from_username, @to_user_id, @text,
+          @envelope_json, @sent_at, @created_at
         )
       `,
       )
@@ -303,7 +337,8 @@ export class UserStore {
         from_user_id: msg.fromUserId,
         from_username: msg.fromUsername,
         to_user_id: msg.toUserId,
-        text: msg.text,
+        text: msg.text ?? '',
+        envelope_json: msg.envelope ? JSON.stringify(msg.envelope) : null,
         sent_at: msg.sentAt,
         created_at: new Date().toISOString(),
       });
@@ -319,6 +354,7 @@ export class UserStore {
           from_username AS fromUsername,
           to_user_id AS toUserId,
           text,
+          envelope_json AS envelopeJson,
           sent_at AS sentAt
         FROM pending_messages
         WHERE to_user_id = ?
@@ -326,8 +362,8 @@ export class UserStore {
         LIMIT ?
       `,
       )
-      .all(toUserId, limit) as PendingChatMessage[];
-    return rows;
+      .all(toUserId, limit) as (PendingChatMessage & { envelopeJson: string | null })[];
+    return rows.map(rowToMessage);
   }
 
   deletePendingMessages(ids: string[]): void {

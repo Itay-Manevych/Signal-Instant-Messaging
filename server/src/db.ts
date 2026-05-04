@@ -46,20 +46,20 @@ export function migrate(db: Db): void {
 
     CREATE TABLE IF NOT EXISTS one_time_prekeys (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key_id TEXT,
       user_id TEXT NOT NULL,
       public_key_b64 TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
-
-    -- Plain transport message history (pre-E2EE). Once Double Ratchet lands,
-    -- store encrypted payloads here instead of plaintext.
+    -- Legacy text stays for compatibility; envelope_json is opaque ciphertext transport.
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
       from_user_id TEXT NOT NULL,
       from_username TEXT NOT NULL,
       to_user_id TEXT NOT NULL,
       text TEXT NOT NULL,
+      envelope_json TEXT,
       sent_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (from_user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -69,14 +69,14 @@ export function migrate(db: Db): void {
     CREATE INDEX IF NOT EXISTS idx_messages_pair_created_at
       ON messages(from_user_id, to_user_id, created_at);
 
-    -- Plain-transport offline queue (pre-E2EE). Once Double Ratchet lands,
-    -- this will store encrypted payloads instead of plaintext.
+    -- Legacy text stays for compatibility; envelope_json is opaque ciphertext transport.
     CREATE TABLE IF NOT EXISTS pending_messages (
       id TEXT PRIMARY KEY,
       from_user_id TEXT NOT NULL,
       from_username TEXT NOT NULL,
       to_user_id TEXT NOT NULL,
       text TEXT NOT NULL,
+      envelope_json TEXT,
       sent_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (from_user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -86,5 +86,21 @@ export function migrate(db: Db): void {
     CREATE INDEX IF NOT EXISTS idx_pending_messages_to_user_created_at
       ON pending_messages(to_user_id, created_at);
   `);
+
+  addColumnIfMissing(db, 'messages', 'envelope_json TEXT');
+  addColumnIfMissing(db, 'pending_messages', 'envelope_json TEXT');
+  addColumnIfMissing(db, 'one_time_prekeys', 'key_id TEXT');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_one_time_prekeys_user_key_id
+      ON one_time_prekeys(user_id, key_id);
+  `);
+}
+
+function addColumnIfMissing(db: Db, table: string, columnSql: string): void {
+  const column = columnSql.split(/\s+/)[0];
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!rows.some((row) => row.name === column)) {
+    db.prepare(`ALTER TABLE ${table} ADD COLUMN ${columnSql}`).run();
+  }
 }
 

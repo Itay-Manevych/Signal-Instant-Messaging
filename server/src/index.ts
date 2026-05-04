@@ -9,12 +9,13 @@ import { registerWsRoutes } from './routes/ws.js';
 import { openDb, migrate } from './db.js';
 import { registerKeyRoutes } from './routes/keys.js';
 import { registerMessageRoutes } from './routes/messages.js';
+import { protocolLog, protocolWarn } from './logging.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-in-production';
 const DB_PATH = process.env.DB_PATH ?? './data/dev.sqlite';
 
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: false });
 
 const db = openDb(DB_PATH);
 migrate(db);
@@ -50,7 +51,8 @@ await app.register(fastifyWebsocket);
 registerWsRoutes(app, store, hub);
 
 if (JWT_SECRET === 'dev-secret-change-in-production') {
-  app.log.warn('Using default JWT_SECRET; set JWT_SECRET in production.');
+  protocolWarn('using default JWT_SECRET; set JWT_SECRET in production');
 }
 
 await app.listen({ port: PORT, host: '0.0.0.0' });
+protocolLog('server listening', { port: PORT, db: DB_PATH });

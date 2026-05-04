@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { UserStore } from '../store.js';
+import { protocolLog } from '../logging.js';
 
 export async function registerMessageRoutes(app: FastifyInstance, store: UserStore): Promise<void> {
   app.get(
@@ -16,6 +17,12 @@ export async function registerMessageRoutes(app: FastifyInstance, store: UserSto
       if (!peer) return reply.code(404).send({ error: 'Unknown user' });
 
       const messages = store.listConversation(me.sub, peerId);
+      protocolLog('history loaded', {
+        user: me.username,
+        peer: peer.username,
+        count: messages.length,
+        envelopes: messages.filter((m) => m.envelope).length,
+      });
       return { messages };
     },
   );
