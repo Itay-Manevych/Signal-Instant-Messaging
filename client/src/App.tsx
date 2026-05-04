@@ -63,8 +63,8 @@ function newOneTimePreKeyId(index: number): string {
 
 function loadSession(): Session | null {
   try {
-    const raw = sessionStorage.getItem(USER_KEY);
-    const token = sessionStorage.getItem(TOKEN_KEY);
+    const raw = localStorage.getItem(USER_KEY);
+    const token = localStorage.getItem(TOKEN_KEY);
     if (!raw || !token) return null;
     const u = JSON.parse(raw) as { userId: string; username: string };
     if (!u.userId || !u.username) return null;
@@ -84,16 +84,16 @@ function loadSession(): Session | null {
 }
 
 function saveSession(s: Session) {
-  sessionStorage.setItem(TOKEN_KEY, s.token);
-  sessionStorage.setItem(
+  localStorage.setItem(
     USER_KEY,
     JSON.stringify({ userId: s.userId, username: s.username }),
   );
+  localStorage.setItem(TOKEN_KEY, s.token);
 }
 
 function clearSession() {
-  sessionStorage.removeItem(TOKEN_KEY);
-  sessionStorage.removeItem(USER_KEY);
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
 }
 
 type Theme = 'dark' | 'light';
@@ -169,6 +169,22 @@ export default function App() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const enrollingRef = useRef(false);
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== TOKEN_KEY && event.key !== USER_KEY) return;
+      const next = loadSession();
+      setSavedSession(next);
+      setSession(next);
+      setThreads({});
+      setPeerList([]);
+      setRegisteredDevices([]);
+      setRecipientId('');
+      setWsError(null);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
