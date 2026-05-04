@@ -9,9 +9,7 @@ export type PendingChatMessage = {
   fromUserId: string;
   fromUsername: string;
   toUserId: string;
-  text?: string;
-  ciphertext?: string;
-  headerJson?: string;
+  text: string;
   sentAt: string;
 };
 
@@ -245,8 +243,12 @@ export class UserStore {
     this.db
       .prepare(
         `
-        INSERT INTO messages (id, from_user_id, from_username, to_user_id, text, ciphertext, header_json, sent_at, created_at)
-        VALUES (@id, @from_user_id, @from_username, @to_user_id, @text, @ciphertext, @header_json, @sent_at, @created_at)
+        INSERT INTO messages (
+          id, from_user_id, from_username, to_user_id, text, sent_at, created_at
+        )
+        VALUES (
+          @id, @from_user_id, @from_username, @to_user_id, @text, @sent_at, @created_at
+        )
       `,
       )
       .run({
@@ -254,30 +256,7 @@ export class UserStore {
         from_user_id: msg.fromUserId,
         from_username: msg.fromUsername,
         to_user_id: msg.toUserId,
-        text: msg.text ?? null,
-        ciphertext: msg.ciphertext ?? null,
-        header_json: msg.headerJson ?? null,
-        sent_at: msg.sentAt,
-        created_at: new Date().toISOString(),
-      });
-  }
-
-  savePendingMessage(msg: PendingChatMessage): void {
-    this.db
-      .prepare(
-        `
-        INSERT INTO pending_messages (id, from_user_id, from_username, to_user_id, text, ciphertext, header_json, sent_at, created_at)
-        VALUES (@id, @from_user_id, @from_username, @to_user_id, @text, @ciphertext, @header_json, @sent_at, @created_at)
-      `,
-      )
-      .run({
-        id: msg.id,
-        from_user_id: msg.fromUserId,
-        from_username: msg.fromUsername,
-        to_user_id: msg.toUserId,
-        text: msg.text ?? null,
-        ciphertext: msg.ciphertext ?? null,
-        header_json: msg.headerJson ?? null,
+        text: msg.text,
         sent_at: msg.sentAt,
         created_at: new Date().toISOString(),
       });
@@ -293,8 +272,6 @@ export class UserStore {
           from_username AS fromUsername,
           to_user_id AS toUserId,
           text,
-          ciphertext,
-          header_json AS headerJson,
           sent_at AS sentAt
         FROM messages
         WHERE
@@ -309,30 +286,47 @@ export class UserStore {
     return rows;
   }
 
-  listPendingMessages(toUserId: string): PendingChatMessage[] {
+  enqueuePendingMessage(msg: PendingChatMessage): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO pending_messages (
+          id, from_user_id, from_username, to_user_id, text, sent_at, created_at
+        )
+        VALUES (
+          @id, @from_user_id, @from_username, @to_user_id, @text, @sent_at, @created_at
+        )
+      `,
+      )
+      .run({
+        id: msg.id,
+        from_user_id: msg.fromUserId,
+        from_username: msg.fromUsername,
+        to_user_id: msg.toUserId,
+        text: msg.text,
+        sent_at: msg.sentAt,
+        created_at: new Date().toISOString(),
+      });
+  }
+
+  listPendingMessagesForUser(toUserId: string, limit = 200): PendingChatMessage[] {
     const rows = this.db
       .prepare(
         `
-        SELECT 
-          id, 
-          from_user_id AS fromUserId, 
-          from_username AS fromUsername, 
-          to_user_id AS toUserId, 
+        SELECT
+          id,
+          from_user_id AS fromUserId,
+          from_username AS fromUsername,
+          to_user_id AS toUserId,
           text,
-          ciphertext,
-          header_json AS headerJson,
           sent_at AS sentAt
         FROM pending_messages
         WHERE to_user_id = ?
         ORDER BY created_at ASC
+        LIMIT ?
       `,
       )
-      .all(toUserId) as PendingChatMessage[];
-
-    if (rows.length > 0) {
-      this.db.prepare('DELETE FROM pending_messages WHERE to_user_id = ?').run(toUserId);
-    }
-
+      .all(toUserId, limit) as PendingChatMessage[];
     return rows;
   }
 
